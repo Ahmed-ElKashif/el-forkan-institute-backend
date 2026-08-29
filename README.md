@@ -1,40 +1,78 @@
-<h1 align="center">📖 El&nbsp;Forkan — Backend API</h1>
+<div align="center">
 
-<p align="center">
-  <em>Quran institute management: students, sections, timetables, attendance,<br/>
-  exams, promotion, certificates and WhatsApp reminders.</em>
-</p>
+<img src="docs/assets/logo.png" alt="دورات الفرقان التثقيفية" width="200" />
 
-<p align="center">
-  <img src="https://img.shields.io/badge/NestJS-11-E0234E?logo=nestjs&logoColor=white" alt="NestJS 11" />
-  <img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Prisma-7-2D3748?logo=prisma&logoColor=white" alt="Prisma 7" />
-  <img src="https://img.shields.io/badge/Postgres-Supabase-3ECF8E?logo=supabase&logoColor=white" alt="Supabase Postgres" />
-  <img src="https://img.shields.io/badge/Zod-validation-3E67B1?logo=zod&logoColor=white" alt="Zod" />
-  <img src="https://img.shields.io/badge/tests-383%20passing-brightgreen" alt="383 tests" />
-  <img src="https://img.shields.io/badge/routes-115-blue" alt="115 routes" />
-</p>
+# El Forkan Institute — Backend API
+
+**دورات الفرقان التثقيفية**
+
+Quran institute management: students, sections, timetables, attendance,<br/>
+exams, promotion, certificates and WhatsApp reminders.
+
+<br/>
+
+![NestJS](https://img.shields.io/badge/NestJS-11-109989?style=for-the-badge&logo=nestjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.7-0D8073?style=for-the-badge&logo=typescript&logoColor=white)
+![Prisma](https://img.shields.io/badge/Prisma-7-0A665C?style=for-the-badge&logo=prisma&logoColor=white)
+![Postgres](https://img.shields.io/badge/Supabase-Postgres-084F47?style=for-the-badge&logo=supabase&logoColor=white)
+
+![Routes](https://img.shields.io/badge/routes-115-C5852D?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-383_passing-C5852D?style=for-the-badge)
+![Zod](https://img.shields.io/badge/validation-Zod-A76D24?style=for-the-badge)
+
+</div>
+
+<br/>
+
+<div align="center">
+
+### The two halves of this system
+
+<table>
+<tr>
+<td align="center" width="50%">
+
+**Backend API**
+
+`NestJS` · `Prisma` · `Postgres`
+
+📍 **You are here**
+
+</td>
+<td align="center" width="50%">
+
+**[Frontend SPA →](https://github.com/Ahmed-ElKashif/el-forkan-institute-frontend)**
+
+`React` · `Vite` · `Tailwind`
+
+Arabic-first, right-to-left admin app
+
+</td>
+</tr>
+</table>
+
+</div>
 
 ---
 
-## ✨ What's inside
+## What's inside
 
-| | Domain | Highlights |
-|---|---|---|
-| 🔐 | **Auth** | JWT access tokens (15 min) + opaque, peppered refresh tokens · CSRF double-submit · per-IP+username login throttle (5/min) |
-| 👥 | **Users & students** | Role-scoped access, Arabic name normalisation, `national_id` encrypted at rest (AES-256-GCM) |
-| 🗓️ | **Calendar** | Hijri ↔ Gregorian year planner, terms, holidays |
-| 📚 | **Curriculum** | Year → level → subject → term tree, scores and weights |
-| 🏫 | **Sections & teaching** | Timetable clash detection, session generation, attendance grid, absence thresholds |
-| 📝 | **Assessment** | Exams, eligibility, score entry + lock, corrections, term results, promotion, COMP gate |
-| 🎓 | **Certificates** | Auto serials (`L4-1447-0001`), reprint a lost copy, re-issue after revocation |
-| 💬 | **Messaging** | Templates, phone-coverage gate, idempotent campaigns, cron reminders, WhatsApp client |
-| 📊 | **Reporting** | Dashboard aggregates, scoped per role |
-| 📥 | **Import / export** | Excel rosters and results — **preview then commit**, nothing touches a domain table until you say so |
+| Domain | Highlights |
+|---|---|
+| **Auth** | JWT access tokens (15 min) + opaque, peppered refresh tokens · CSRF double-submit · per-IP+username login throttle (5/min) |
+| **Users & students** | Role-scoped access, Arabic name normalisation, `national_id` encrypted at rest (AES-256-GCM) |
+| **Calendar** | Hijri ↔ Gregorian year planner, terms, holidays |
+| **Curriculum** | Year → level → subject → term tree, scores and weights |
+| **Sections & teaching** | Timetable clash detection, session generation, attendance grid, absence thresholds |
+| **Assessment** | Exams, eligibility, score entry + lock, corrections, term results, promotion, COMP gate |
+| **Certificates** | Auto serials (`L4-1447-0001`), reprint a lost copy, re-issue after revocation |
+| **Messaging** | Templates, phone-coverage gate, idempotent campaigns, cron reminders, WhatsApp client |
+| **Reporting** | Dashboard aggregates, scoped per role |
+| **Import / export** | Excel rosters and results — **preview then commit**, nothing touches a domain table until you say so |
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
 npm install
@@ -45,15 +83,19 @@ npm run start:dev             # http://localhost:3000
 
 Health check: `GET /health` → `{ "status": "ok", "timestamp": … }`
 
+Seeded head teacher for local work: `headteacher` / `ChangeMe123!`
+([prisma/seed-head-teacher.ts](prisma/seed-head-teacher.ts)).
+
+> [!WARNING]
+> Both Postgres URLs need `sslmode=no-verify`, **not** `require` — newer
+> `pg-connection-string` reads `require` as full CA verification, which the
+> Supabase pooler cert fails. Diagnosis in [agent/memory.md](agent/memory.md).
+
 ### Environment
 
 Every key in [.env.example](.env.example) is required except `REFRESH_TOKEN_PEPPER`
 and the WhatsApp credentials (sending stays inert without them — campaigns
 queue instead of failing).
-
-> ⚠️ Both Postgres URLs need `sslmode=no-verify`, **not** `require` — newer
-> `pg-connection-string` reads `require` as full CA verification, which the
-> Supabase pooler cert fails. Diagnosis in [agent/memory.md](agent/memory.md).
 
 Generate the two crypto keys:
 
@@ -63,7 +105,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 ---
 
-## 🧱 Architecture
+## Architecture
 
 ```
 AppModule
@@ -90,7 +132,7 @@ before the work starts. Full reasoning in [agent/architecture.md](agent/architec
 
 ---
 
-## 🗺️ API map
+## API map
 
 | Prefix | Routes | | Prefix | Routes |
 |---|--:|---|---|--:|
@@ -101,12 +143,20 @@ before the work starts. Full reasoning in [agent/architecture.md](agent/architec
 | calendar & curriculum | 12 | | messaging | 6 |
 | `/settings` | 7 | | `/imports`, `/exports` | 7 |
 
-Plus `GET /health`. Routes with no `@Roles()` are open to any authenticated user; `@Roles('head_teacher')`
-guards anything that destroys data, rewrites history, or changes the rules.
+Plus `GET /health`. Routes with no `@Roles()` are open to any authenticated user;
+`@Roles('head_teacher')` guards anything that destroys data, rewrites history, or
+changes the rules — **54 of the 115**.
+
+### Two roles, and only two
+
+| Role | Scope | Can |
+|---|---|---|
+| **مدير** `head_teacher` | branch or whole institute | everything, including every destructive and history-rewriting action |
+| **معلّم** `teacher` | own sections only | read plus day-to-day entry |
 
 ---
 
-## 🧪 Testing
+## Testing
 
 Two tiers — Jest for pure logic, live smoke suites for the wiring.
 
@@ -121,12 +171,15 @@ node test/smoke/b5-smoke.mjs   # terminal 2
 ```
 
 Smoke suites drive the real HTTP API against the live database — see
-[test/smoke/README.md](test/smoke/README.md). **Run them one at a time**: login
-is throttled at 5/min and back-to-back runs exhaust the window.
+[test/smoke/README.md](test/smoke/README.md).
+
+> [!TIP]
+> **Run smoke suites one at a time.** Login is throttled at 5/min per
+> IP+username, and back-to-back runs exhaust the window.
 
 ---
 
-## 📜 Scripts
+## Scripts
 
 | Command | Does |
 |---|---|
@@ -138,11 +191,25 @@ is throttled at 5/min and back-to-back runs exhaust the window.
 
 ---
 
-## 📓 Project journal
+## Project journal
 
-- [agent/architecture.md](agent/architecture.md) — module map and *why* each shape
-- [agent/progress.md](agent/progress.md) — milestone log, decisions, open questions
-- [agent/memory.md](agent/memory.md) — gotchas that cost real time
-- [docs/nestjs-for-express-developers.md](docs/nestjs-for-express-developers.md)
+Living documents, kept current as the build moves:
 
-**Status:** backend Phases 0–6 complete — 115 routes live. Frontend not started.
+| Doc | Answers |
+|---|---|
+| [agent/architecture.md](agent/architecture.md) | The module map, and *why* each piece is shaped that way |
+| [agent/progress.md](agent/progress.md) | Milestone log, decisions taken, questions still open |
+| [agent/memory.md](agent/memory.md) | Gotchas that cost real time — read before debugging |
+| [docs/nestjs-for-express-developers.md](docs/nestjs-for-express-developers.md) | Nest concepts, for an Express background |
+
+---
+
+<div align="center">
+
+**Status:** backend Phases 0–6 complete · 115 routes live.<br/>
+Frontend is at F0b — sign-in and session working.
+[See the frontend repo →](https://github.com/Ahmed-ElKashif/el-forkan-institute-frontend)
+
+<sub>دورات الفرقان التثقيفية · El Forkan Institute</sub>
+
+</div>
