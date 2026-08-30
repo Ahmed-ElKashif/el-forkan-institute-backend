@@ -375,6 +375,10 @@ model import_jobs {
   import_type       String
   branch_id         Int?            @db.SmallInt
   academic_year_id  Int?            @db.SmallInt
+  // The 1447 back-fill flag, captured at preview time. commit reads it from
+  // here rather than from the request body, so it cannot be tampered with
+  // between preview and commit (report F3b).
+  is_historical     Boolean         @default(false)
   storage_path      String
   original_filename String?
   status            job_status_t    @default(pending)

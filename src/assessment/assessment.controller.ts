@@ -9,7 +9,9 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import { CurrentActor } from '../common/actor.decorator';
 import type { Actor } from '../common/actor.decorator';
 import { Page } from '../common/pagination';
@@ -50,16 +52,20 @@ export class AssessmentController {
 
   // §3: "Create & schedule exams" is open to both roles.
   @Get('exams')
-  listExams(@Query() query: ListExamsQueryDto): Promise<Page<ExamView>> {
-    return this.exams.list(query);
+  listExams(
+    @Query() query: ListExamsQueryDto,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<Page<ExamView>> {
+    return this.exams.list(query, viewer);
   }
 
   @Post('exams')
   createExam(
     @Body() dto: CreateExamDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ExamView> {
-    return this.exams.create(dto, actor);
+    return this.exams.create(dto, actor, viewer);
   }
 
   @Patch('exams/:id')
@@ -67,8 +73,9 @@ export class AssessmentController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateExamDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ExamView> {
-    return this.exams.update(id, dto, actor);
+    return this.exams.update(id, dto, actor, viewer);
   }
 
   // R7 / §4.6 — مستحقو الامتحانات.
@@ -76,16 +83,18 @@ export class AssessmentController {
   computeEligibility(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<{ eligible: number; ineligible: number }> {
-    return this.exams.computeEligibility(id, actor);
+    return this.exams.computeEligibility(id, actor, viewer);
   }
 
   @Get('exams/:id/eligibility')
   listEligibility(
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
     @Query('reasonCode') reasonCode?: string,
   ): Promise<EligibilityRow[]> {
-    return this.exams.listEligibility(id, reasonCode);
+    return this.exams.listEligibility(id, viewer, reasonCode);
   }
 
   @Patch('exam-eligibility/:id')
@@ -94,13 +103,17 @@ export class AssessmentController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: OverrideEligibilityDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<EligibilityRow> {
-    return this.exams.overrideEligibility(id, dto, actor);
+    return this.exams.overrideEligibility(id, dto, actor, viewer);
   }
 
   @Get('exams/:id/scores')
-  getScoreGrid(@Param('id', ParseUUIDPipe) id: string): Promise<ScoreGrid> {
-    return this.results.getScoreGrid(id);
+  getScoreGrid(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<ScoreGrid> {
+    return this.results.getScoreGrid(id, viewer);
   }
 
   @Post('exams/:id/scores')
@@ -108,8 +121,9 @@ export class AssessmentController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SaveScoresDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<{ saved: number }> {
-    return this.results.saveScores(id, dto, actor);
+    return this.results.saveScores(id, dto, actor, viewer);
   }
 
   @Post('exams/:id/lock')
@@ -117,8 +131,9 @@ export class AssessmentController {
   lock(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<{ isLocked: boolean }> {
-    return this.results.setLocked(id, true, actor);
+    return this.results.setLocked(id, true, actor, viewer);
   }
 
   @Post('exams/:id/unlock')
@@ -126,8 +141,9 @@ export class AssessmentController {
   unlock(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<{ isLocked: boolean }> {
-    return this.results.setLocked(id, false, actor);
+    return this.results.setLocked(id, false, actor, viewer);
   }
 
   // R8: only the head teacher may change a grade after entry, with a reason.
@@ -137,8 +153,9 @@ export class AssessmentController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CorrectScoreDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ScoreRow> {
-    return this.results.correctScore(id, dto, actor);
+    return this.results.correctScore(id, dto, actor, viewer);
   }
 
   @Post('sections/:sectionId/term-results/:termId/compute')
@@ -146,8 +163,15 @@ export class AssessmentController {
     @Param('sectionId', ParseUUIDPipe) sectionId: string,
     @Param('termId', ParseIntPipe) termId: number,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<TermResultView[]> {
-    return this.results.computeTermResults(termId, sectionId, actor, false);
+    return this.results.computeTermResults(
+      termId,
+      sectionId,
+      actor,
+      false,
+      viewer,
+    );
   }
 
   // §3: "Run promotion / finalise results" is head-teacher only.
@@ -157,16 +181,24 @@ export class AssessmentController {
     @Param('sectionId', ParseUUIDPipe) sectionId: string,
     @Param('termId', ParseIntPipe) termId: number,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<TermResultView[]> {
-    return this.results.computeTermResults(termId, sectionId, actor, true);
+    return this.results.computeTermResults(
+      termId,
+      sectionId,
+      actor,
+      true,
+      viewer,
+    );
   }
 
   @Post('promotion/preview')
   @Roles('head_teacher')
   previewPromotion(
     @Body() dto: RunPromotionDto,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<PromotionPreviewRow[]> {
-    return this.promotion.preview(dto);
+    return this.promotion.preview(dto, viewer);
   }
 
   @Post('promotion/confirm')
@@ -174,31 +206,38 @@ export class AssessmentController {
   confirmPromotion(
     @Body() dto: ConfirmPromotionDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ) {
-    return this.promotion.confirm(dto, actor);
+    return this.promotion.confirm(dto, actor, viewer);
   }
 
   // R20: a gate on enrolment, not an automatic promotion.
   @Get('students/:id/comp-eligibility')
-  checkCompEligibility(@Param('id', ParseUUIDPipe) id: string) {
-    return this.promotion.checkCompEligibility(id);
+  checkCompEligibility(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ) {
+    return this.promotion.checkCompEligibility(id, viewer);
   }
 
   @Get('certificates/certifiable')
   @Roles('head_teacher')
   listCertifiable(
+    @CurrentUser() viewer: AuthenticatedUser,
     @Query('levelId') levelId?: string,
   ): Promise<CertifiableStudent[]> {
     return this.promotion.listCertifiable(
+      viewer,
       levelId ? Number.parseInt(levelId, 10) : undefined,
     );
   }
 
   @Get('certificates')
   listCertificates(
+    @CurrentUser() viewer: AuthenticatedUser,
     @Query('studentId') studentId?: string,
   ): Promise<CertificateView[]> {
-    return this.promotion.listCertificates(studentId);
+    return this.promotion.listCertificates(viewer, studentId);
   }
 
   @Post('certificates')
@@ -206,8 +245,9 @@ export class AssessmentController {
   issueCertificate(
     @Body() dto: IssueCertificateDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<CertificateView> {
-    return this.promotion.issueCertificate(dto, actor);
+    return this.promotion.issueCertificate(dto, actor, viewer);
   }
 
   /**
@@ -222,8 +262,9 @@ export class AssessmentController {
   reprintCertificate(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<CertificatePrintPayload> {
-    return this.promotion.reprintCertificate(id, actor);
+    return this.promotion.reprintCertificate(id, actor, viewer);
   }
 
   @Post('certificates/:id/revoke')
@@ -232,7 +273,8 @@ export class AssessmentController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RevokeCertificateDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<CertificateView> {
-    return this.promotion.revokeCertificate(id, dto.reason, actor);
+    return this.promotion.revokeCertificate(id, dto.reason, actor, viewer);
   }
 }

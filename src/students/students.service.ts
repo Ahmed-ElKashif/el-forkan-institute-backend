@@ -7,6 +7,7 @@ import { Prisma, students as StudentRecord } from '@prisma/client';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
 import { branchScope } from '../common/branch-scope';
+import { resolveWritableBranch } from '../common/access-scope';
 import { toDateOnlyString } from '../common/date-only.schema';
 import { decryptField, encryptField } from '../common/field-encryption';
 import { buildPage, Page, toPrismaPage } from '../common/pagination';
@@ -106,13 +107,22 @@ export class StudentsService {
     };
   }
 
-  async create(dto: CreateStudentDto, actor: Actor): Promise<StudentView> {
+  async create(
+    dto: CreateStudentDto,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<StudentView> {
+    // F4: a branch-bound teacher may only create students inside their own
+    // branch; the body's branchId is ignored for them. An institute-wide head
+    // teacher may place a student in any branch (or none).
+    const branchId = resolveWritableBranch(viewer, dto.branchId);
+
     const created = await this.prisma.students.create({
       data: {
         student_code: dto.studentCode ?? (await this.nextStudentCode()),
         full_name: dto.fullName,
         gender: dto.gender,
-        branch_id: dto.branchId,
+        branch_id: branchId,
         phone: dto.phone,
         whatsapp_phone: dto.whatsappPhone,
         governorate_id: dto.governorateId,
@@ -149,7 +159,10 @@ export class StudentsService {
     // spread produces a union Prisma's XOR input types cannot narrow.
     const data: Prisma.studentsUncheckedUpdateInput = {
       full_name: dto.fullName,
-      branch_id: dto.branchId,
+      // F4: only an institute-wide head teacher may move a student between
+      // branches. For a branch-bound viewer this is `undefined`, so the column
+      // is left untouched and the student cannot be moved out of reach.
+      branch_id: viewer.branchId === null ? dto.branchId : undefined,
       student_code: dto.studentCode,
       phone: dto.phone,
       whatsapp_phone: dto.whatsappPhone,

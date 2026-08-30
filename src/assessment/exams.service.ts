@@ -1,9 +1,17 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { canAccessBranch, resolveWritableBranch } from '../common/access-scope';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
+import { branchScope } from '../common/branch-scope';
 import { buildPage, Page, toPrismaPage } from '../common/pagination';
 import { PrismaService } from '../prisma/prisma.service';
+import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import {
   AbsencePolicyFacts,
   checkEligibility,
@@ -79,8 +87,13 @@ export class ExamsService {
     private readonly audit: AuditService,
   ) {}
 
-  async list(query: ListExamsQueryDto): Promise<Page<ExamView>> {
+  async list(
+    query: ListExamsQueryDto,
+    viewer: AuthenticatedUser,
+  ): Promise<Page<ExamView>> {
     const where: Prisma.examsWhereInput = {
+      // F1: without this, GET /exams listed every branch's exams to any teacher.
+      ...branchScope(viewer.branchId),
       ...(query.termId ? { term_id: query.termId } : {}),
       ...(query.examType ? { exam_type: query.examType } : {}),
       ...(query.isLocked === undefined ? {} : { is_locked: query.isLocked }),
@@ -104,7 +117,19 @@ export class ExamsService {
    * children (§4.1) — so scheduling one against a container is refused here
    * rather than producing an exam nobody can be eligible for.
    */
-  async create(dto: CreateExamDto, actor: Actor): Promise<ExamView> {
+  async create(
+    dto: CreateExamDto,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<ExamView> {
+    // F1: a branch-bound teacher may only create exams inside their own branch;
+    // the body's branchId is theirs by force. An institute-wide head teacher may
+    // name any branch.
+    const branchId = resolveWritableBranch(viewer, dto.branchId);
+    if (branchId === null) {
+      throw new ForbiddenException('An exam must belong to a branch');
+    }
+
     const curriculum = await this.prisma.curriculum.findUniqueOrThrow({
       where: { id: dto.curriculumId },
       select: { is_examinable: true, academic_year_id: true },
@@ -138,7 +163,7 @@ export class ExamsService {
      */
     const duplicate = await this.prisma.exams.findFirst({
       where: {
-        branch_id: dto.branchId,
+        branch_id: branchId,
         term_id: dto.termId,
         curriculum_id: dto.curriculumId,
         gender: dto.gender,
@@ -154,7 +179,7 @@ export class ExamsService {
 
     const created = await this.prisma.exams.create({
       data: {
-        branch_id: dto.branchId,
+        branch_id: branchId,
         academic_year_id: term.academic_year_id,
         term_id: dto.termId,
         curriculum_id: dto.curriculumId,
@@ -177,11 +202,33 @@ export class ExamsService {
     return toExamView(created);
   }
 
+  /**
+   * Loads an exam's branch and refuses if the viewer may not see it (F1). Every
+   * exam-addressed route funnels through this, so there is no id-addressed path
+   * into another branch's exam. Throws NotFound rather than Forbidden, matching
+   * `StudentsService.findVisible`: a teacher must not learn that an exam in
+   * another branch exists.
+   */
+  private async assertExamVisible(
+    examId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<void> {
+    const exam = await this.prisma.exams.findUnique({
+      where: { id: examId },
+      select: { branch_id: true },
+    });
+    if (!exam || !canAccessBranch(viewer, exam.branch_id)) {
+      throw new NotFoundException('Exam not found');
+    }
+  }
+
   async update(
     id: string,
     dto: UpdateExamDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<ExamView> {
+    await this.assertExamVisible(id, viewer);
     const before = await this.prisma.exams.findUniqueOrThrow({
       where: { id },
       ...EXAM_SHAPE,
@@ -215,7 +262,9 @@ export class ExamsService {
   async computeEligibility(
     examId: string,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<{ eligible: number; ineligible: number }> {
+    await this.assertExamVisible(examId, viewer);
     const exam = await this.prisma.exams.findUniqueOrThrow({
       where: { id: examId },
       include: { curriculum: true, terms: true },
@@ -340,8 +389,10 @@ export class ExamsService {
 
   async listEligibility(
     examId: string,
+    viewer: AuthenticatedUser,
     reasonCode?: string,
   ): Promise<EligibilityRow[]> {
+    await this.assertExamVisible(examId, viewer);
     const rows = await this.prisma.exam_eligibility.findMany({
       where: {
         exam_id: examId,
@@ -358,10 +409,12 @@ export class ExamsService {
     eligibilityId: string,
     dto: OverrideEligibilityDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<EligibilityRow> {
     const before = await this.prisma.exam_eligibility.findUniqueOrThrow({
       where: { id: eligibilityId },
     });
+    await this.assertExamVisible(before.exam_id, viewer);
     const updated = await this.prisma.exam_eligibility.update({
       where: { id: eligibilityId },
       data: {

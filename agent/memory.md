@@ -81,14 +81,16 @@ from the Express/plain-Redux patterns he already knows.
   same local working directory with no git repo at any level yet.
 - Reuses the `/health` route (Milestone 1) as Render's health-check path for
   the backend Web Service.
-- **Open risk, now fully live (not optional) given two separate services:**
+- **Cross-site cookie drop — now handled via `COOKIE_SAMESITE` (frontend F0d).**
   Render's default `*.onrender.com` domains are on the Public Suffix List, so
-  the backend and frontend services are cross-site to each other — the
-  `SameSite=Strict` refresh cookie (see Auth decisions above) will silently
-  stop being sent once deployed, even though it works fine in local dev. Fix
-  before shipping past Phase 0: custom domain under one registrable root
-  (recommended), or `SameSite=None; Secure` as a stopgap (already covered by
-  `csrf-csrf` on `/auth/refresh`). Full writeup in `furqan-spec-v1.1.md` §7.10.
+  two separate services are cross-site and a `SameSite=Strict` refresh cookie is
+  silently dropped once deployed, even though it works fine in local dev. The
+  refresh and CSRF cookies now both read `COOKIE_SAMESITE` through one helper
+  (`src/auth/cookie-security.ts`): default `strict`; set `none` for a cross-site
+  deploy (forces `Secure`; CSRF is unaffected — `csrf-csrf` binds to the cookie
+  hash, not `SameSite`). `backend/render.yaml` sets `none`. The alternative is a
+  custom domain under one registrable root, which keeps `strict`. Decision table
+  and runbook in the frontend repo's `DEPLOY.md`; spec §7.10.
 - Backend `CORS_ORIGIN` must be set to the frontend's actual Render URL (or
   custom domain) — genuine cross-origin `fetch` now, not same-origin.
 - Env vars in production come from Render's dashboard/Environment Groups, not
@@ -359,3 +361,93 @@ constructor at runtime. Installed `@prisma/adapter-pg` + `pg`; `PrismaService`
 (`src/prisma/prisma.service.ts`) builds `new PrismaPg(process.env.DATABASE_URL)`
 and passes it as `{ adapter }` to `super()`. `schema.prisma`'s datasource block
 is now just `provider = "postgresql"` — no connection info at all.
+
+## Security review remediation — gotchas (2026-08-30)
+
+The external white-box review (report.md) drove a round of fixes. Things that
+will bite a future session if forgotten (full log in progress.md):
+
+- **Env is validated at boot** (`src/config/env.ts`, called first in
+  `main.ts`). The process now *refuses to start* if `JWT_ACCESS_SECRET` (<32
+  chars), `CSRF_SECRET` (<16), `FIELD_ENCRYPTION_KEY`, `DATABASE_URL`, or — in
+  production — `CORS_ORIGIN` is missing. If the app won't boot after an env
+  change, read the single aggregated error it prints; it names every offending
+  var. Unit tests set these directly and never call `validateEnv()`, so a
+  28-char test secret is fine in specs.
+
+- **Cookie `secure` now defaults ON** (`cookie-security.ts`, was gated on
+  `NODE_ENV==='production'`). For **local HTTP dev you must set
+  `COOKIE_SECURE=false`** or the browser silently drops the refresh cookie and
+  every refresh fails — the same failure shape as the `COOKIE_SAMESITE` gotcha.
+  `COOKIE_SAMESITE=none` still forces secure on regardless.
+
+- **`import_jobs.is_historical` is a new column** (in `prisma/schema.prisma` +
+  generated client). `POST /imports/:id/commit` now takes **no body** —
+  branch/year/isHistorical come from the persisted job.
+
+- **⚠️ `prisma db push` DROPS the partial unique indexes — never run it on this
+  DB.** On 2026-08-30 a `db push` (to add `is_historical`) succeeded but
+  *silently dropped* both partial unique indexes, because Prisma can't represent
+  them so it reconciled them out of existence:
+  `certificates (student_id, level_id) WHERE revoked_at IS NULL` (one live
+  certificate per student/level) and `section_teachers (section_id) WHERE
+  is_primary` (one primary teacher per section). CHECK constraints survived (28
+  of them) — `db push` leaves those alone; only indexes get reconciled. Both were
+  recreated, and `npm run db:manual` (`prisma/tools/manual-objects.sql`) repairs
+  them idempotently if it ever happens again.
+
+- **The database now has a real migration history** (`prisma/migrations/`),
+  added 2026-08-30 in response to that incident. `0_init` is a hand-assembled
+  baseline: `migrate diff --from-empty --to-schema` output, plus the things
+  Prisma cannot emit — `CREATE EXTENSION pgcrypto/pg_trgm`, all 28 CHECK
+  constraints (real names, from `pg_get_constraintdef`), and the 2 partial unique
+  indexes. It was **verified** by replaying it into a throwaway schema inside a
+  transaction and diffing the result against production (39 tables / 104 FKs /
+  21 enums / 28 checks / 2 partial uniques — exact match), then rolling back.
+  Marked applied on prod via `migrate resolve --applied 0_init`, so it only runs
+  on a fresh DB.
+  - Workflow: `npm run db:migrate:new -- <name>` → review → `npm run db:migrate`.
+  - **`migrate dev` is unusable here** — it wants a shadow database the Supabase
+    pooler won't grant. That's why `db:migrate:new` diffs against the live DB
+    instead. Never run `migrate dev`/`migrate reset` against prod (reset drops
+    all data).
+  - **Every diff reports the 2 partial uniques as drift and emits `DROP INDEX`
+    for them.** `prisma/tools/new-migration.mjs` strips those automatically and
+    prints that it did. If you hand-write a migration, never re-add them.
+  - `schema-v1.1.sql` is the original bootstrap DDL, superseded by `0_init` and
+    no longer maintained.
+
+- **`npm run start:prod` was silently broken until 2026-08-30 — and so was the
+  Render deploy.** `tsconfig.build.json` set no `rootDir`, so TypeScript inferred
+  it from every included file; the root-level `prisma.config.ts` dragged the
+  common root up to the project root and the entrypoint was emitted at
+  `dist/src/main.js`. But `start:prod` (and `render.yaml`'s `startCommand`) run
+  `node dist/main`, which did not exist — a production boot would have failed
+  immediately. Fixed by pinning `"rootDir": "./src"` and excluding `prisma` and
+  `prisma.config.ts` from the build. Verified by actually booting
+  `node dist/main.js` on a spare port and hitting `/health`.
+  - Side effect: with `rootDir` set, the incremental cache moved from
+    `dist/tsconfig.build.tsbuildinfo` to the project root. It is now gitignored
+    (`*.tsbuildinfo`). If a build ever emits *nothing* while exiting 0, delete
+    that file — a stale one makes tsc think everything is up to date.
+  - The same exclusion stops `prisma/seed-head-teacher.ts` compiling into the
+    bundle, which had been shipping the hardcoded `ChangeMe123!` default into
+    production. Nothing in `src/` imports the seed; it is a one-off admin script.
+
+- **Prisma CLI 8.x is NOT usable on this project.** Following the CLI's own
+  update notice upgraded `prisma` to `8.0.0-rc.12` while `@prisma/client` stayed
+  on 7.10.0. v8 replaced the whole surface with a "contract" system — no
+  `generate`, no `db execute`, no `migrate` — and its `contract emit` cannot even
+  read this repo's `prisma.config.ts`. Symptom: `No command registered for
+  'generate'`. **Fix: keep `prisma` and `@prisma/client` pinned to matching 7.x**
+  (currently both 7.10.0). Do not accept the 8.x update prompt.
+
+- **JWT verify pins `algorithms: ['HS256']`, issuer and audience** and Zod-parses
+  the payload (`jwt-token.service.ts`, constants in `auth/auth.constants.ts`).
+  Any test that hand-signs a token with `JwtService.sign` must pass the same
+  `issuer`/`audience`/`algorithm` or verify will reject it.
+
+- **`viewer` is threaded through assessment + import services.** When adding a
+  new method there, take `viewer: AuthenticatedUser` and scope by branch via
+  `branchScope` / `canAccessBranch` / `resolveWritableBranch` — the review found
+  the whole failure class was "a service that skipped the scope layer".

@@ -59,6 +59,17 @@ export class WhatsAppClient {
       return failure('not_configured', 'WHATSAPP_ACCESS_TOKEN is not set');
     }
 
+    // F11c: the id is interpolated into the Graph API URL path. Meta phone
+    // number ids are numeric; refusing anything else stops a value like `../`
+    // (set through institute settings) from redirecting the call to another
+    // Graph endpoint.
+    if (!/^\d+$/.test(phoneNumberId)) {
+      return failure(
+        'invalid_phone_number_id',
+        'whatsapp_phone_number_id must be numeric',
+      );
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
     try {

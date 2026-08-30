@@ -63,7 +63,15 @@ export const UpdateInstituteSettingsSchema = z
     // Identifiers only — the WhatsApp access token lives in env, never in the
     // database (spec §7.8).
     whatsappBusinessPhone: z.string().trim().max(30).nullable(),
-    whatsappPhoneNumberId: z.string().trim().max(60).nullable(),
+    // Meta phone-number ids are numeric. Constrained here so a value with path
+    // characters can never be stored, let alone interpolated into the Graph
+    // API URL (report F11c).
+    whatsappPhoneNumberId: z
+      .string()
+      .trim()
+      .max(60)
+      .regex(/^\d+$/, 'whatsapp_phone_number_id must be numeric')
+      .nullable(),
     whatsappOwnerUserId: z.uuid().nullable(),
   })
   .strict()

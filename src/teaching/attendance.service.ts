@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -163,6 +164,27 @@ export class AttendanceService {
       select: { id: true, section_id: true, session_date: true },
     });
     await this.assertSectionAccess(session.section_id, viewer);
+
+    // F2: the section check above is necessary but not sufficient — a teacher
+    // legitimately saving their own session's column could otherwise attach
+    // rows to enrolments in any section in any branch, which then feed
+    // applyAbsencePolicy and can flip another branch's exam eligibility. Reject
+    // any enrolment that is not actually active in this session's section.
+    const validEnrollmentIds = new Set(
+      (
+        await this.prisma.enrollments.findMany({
+          where: { section_id: session.section_id, status: 'active' },
+          select: { id: true },
+        })
+      ).map((enrollment) => enrollment.id),
+    );
+    for (const entry of dto.entries) {
+      if (!validEnrollmentIds.has(entry.enrollmentId)) {
+        throw new BadRequestException(
+          'An attendance row refers to an enrolment that is not in this section',
+        );
+      }
+    }
 
     await this.prisma.$transaction(
       dto.entries.map((entry) =>

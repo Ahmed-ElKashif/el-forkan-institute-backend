@@ -19,8 +19,10 @@ import type { Actor } from '../common/actor.decorator';
 import { Page } from '../common/pagination';
 import { DeleteWithReasonDto } from '../common/soft-delete.schema';
 import {
+  ChangePasswordDto,
   CreateUserDto,
   ListUsersQueryDto,
+  ResetPasswordDto,
   UpdateUserDto,
 } from './dto/user.schema';
 import { PublicUser } from './users.mapper';
@@ -35,6 +37,23 @@ export class UsersController {
   @Get('me')
   getMe(@CurrentUser() user: AuthenticatedUser): Promise<PublicUser> {
     return this.usersService.getProfile(user.id);
+  }
+
+  // Declared before :id routes so "me" is never parsed as a UUID. F10: any
+  // authenticated user may change their own password with the current one.
+  @Post('me/password')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  changeMyPassword(
+    @Body() dto: ChangePasswordDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentActor() actor: Actor,
+  ): Promise<void> {
+    return this.usersService.changeOwnPassword(
+      user.id,
+      dto.currentPassword,
+      dto.newPassword,
+      actor,
+    );
   }
 
   @Get()
@@ -73,6 +92,19 @@ export class UsersController {
     @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<PublicUser> {
     return this.usersService.update(id, dto, actor, viewer);
+  }
+
+  // F10: the head teacher resets a user's password without recreating them.
+  @Post(':id/password')
+  @Roles('head_teacher')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  resetPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ResetPasswordDto,
+    @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<void> {
+    return this.usersService.resetPassword(id, dto.newPassword, actor, viewer);
   }
 
   @Delete(':id')

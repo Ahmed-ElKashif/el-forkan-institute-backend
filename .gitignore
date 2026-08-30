@@ -10,6 +10,9 @@ node_modules/
 # Build output
 dist/
 build/
+# TypeScript incremental build cache. Lives at the project root now that
+# tsconfig.build.json pins rootDir to src/ (it used to sit inside dist/).
+*.tsbuildinfo
 
 # Logs
 *.log

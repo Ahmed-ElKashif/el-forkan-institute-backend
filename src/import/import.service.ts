@@ -6,10 +6,12 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { parsePhoneNumberWithError } from 'libphonenumber-js';
+import { resolveWritableBranch } from '../common/access-scope';
 import { normalizeArabic } from '../common/arabic';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
 import { buildPage, Page, toPrismaPage } from '../common/pagination';
+import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import { parseHijriYear } from '../excel/result-parsing';
 import {
   ColumnMap,
@@ -109,6 +111,18 @@ interface SheetContext {
   sectionId: string;
 }
 
+/**
+ * The targeting a commit applies, read from the persisted `import_jobs` row —
+ * never from the request. This is the whole point of F3b: `commit` cannot be
+ * pointed at a different branch, year or historical flag than the one the
+ * preview was reviewed under.
+ */
+interface CommitTargeting {
+  branchId: number;
+  academicYearId: number;
+  isHistorical: boolean;
+}
+
 @Injectable()
 export class ImportService {
   constructor(
@@ -124,21 +138,33 @@ export class ImportService {
     file: { buffer: Buffer; originalname: string },
     dto: StartImportDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<ImportJobView> {
+    // F3: a branch-bound teacher may only import into their own branch; the
+    // body's branchId is theirs by force. This resolved value is what is stored
+    // on the job and what every downstream query and the commit read.
+    const branchId = resolveWritableBranch(viewer, dto.branchId);
+    if (branchId === null) {
+      throw new BadRequestException('An import must target a branch');
+    }
+    const dtoWithBranch: StartImportDto = { ...dto, branchId };
+
     const sheets = await loadWorkbook(file.buffer);
-    const contexts = this.resolveSheetContexts(sheets, dto);
+    const contexts = this.resolveSheetContexts(sheets, dtoWithBranch);
     if (contexts.length === 0) {
       throw new BadRequestException(
         'No sheet named إخوة or أخوات was found, and no section was named for one',
       );
     }
-    await this.assertYearMatchesFile(sheets, dto);
+    await this.assertYearMatchesFile(sheets, dtoWithBranch);
 
     const job = await this.prisma.import_jobs.create({
       data: {
-        import_type: dto.importType,
-        branch_id: dto.branchId,
-        academic_year_id: dto.academicYearId,
+        import_type: dtoWithBranch.importType,
+        branch_id: branchId,
+        academic_year_id: dtoWithBranch.academicYearId,
+        // F3b: persist the historical flag now; commit reads it from here.
+        is_historical: dtoWithBranch.isHistorical,
         // The upload is held in memory for this request only. Persisting it to
         // Supabase Storage (§7.6.4) is a separate concern from parsing it, and
         // the row keeps a name so a stored copy can be linked later.
@@ -155,7 +181,9 @@ export class ImportService {
         (candidate) => candidate.name === context.sheetName,
       );
       if (!sheet) continue;
-      rows.push(...(await this.parseSheet(sheet.rows, context, dto, job.id)));
+      rows.push(
+        ...(await this.parseSheet(sheet.rows, context, dtoWithBranch, job.id)),
+      );
     }
 
     await this.prisma.import_rows.createMany({ data: rows });
@@ -180,17 +208,35 @@ export class ImportService {
     return toJobView(finished, counts);
   }
 
-  async getJob(jobId: string): Promise<ImportJobView> {
+  /**
+   * Loads a job and refuses if the viewer's branch may not see it (F3a).
+   * Every job- and row-addressed route funnels through this, so a teacher can
+   * no longer read another branch's roster by guessing a job UUID.
+   */
+  private async loadVisibleJob(jobId: string, viewer: AuthenticatedUser) {
     const job = await this.prisma.import_jobs.findUniqueOrThrow({
       where: { id: jobId },
     });
+    if (viewer.branchId !== null && job.branch_id !== viewer.branchId) {
+      throw new NotFoundException('Import job not found');
+    }
+    return job;
+  }
+
+  async getJob(
+    jobId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<ImportJobView> {
+    const job = await this.loadVisibleJob(jobId, viewer);
     return toJobView(job, await this.countActions(jobId));
   }
 
   async listRows(
     jobId: string,
     query: ListImportRowsQueryDto,
+    viewer: AuthenticatedUser,
   ): Promise<Page<ImportRowView>> {
+    await this.loadVisibleJob(jobId, viewer);
     const where: Prisma.import_rowsWhereInput = {
       import_job_id: jobId,
       ...(query.action ? { action: query.action } : {}),
@@ -211,17 +257,32 @@ export class ImportService {
     rowId: bigint,
     dto: FixImportRowDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<ImportRowView> {
     const row = await this.prisma.import_rows.findUniqueOrThrow({
       where: { id: rowId },
     });
-    const job = await this.prisma.import_jobs.findUniqueOrThrow({
-      where: { id: row.import_job_id },
-    });
+    const job = await this.loadVisibleJob(row.import_job_id, viewer);
     if (job.committed_at) {
       throw new ConflictException(
         'This import has already been committed and can no longer be edited',
       );
+    }
+
+    // F3c: `matchStudentId` becomes the update target at commit. Without this a
+    // teacher could point a row at any student UUID in the institute and have
+    // the commit overwrite that student's phone and markaz. Only a student in
+    // this job's own branch may be named.
+    if (dto.matchStudentId != null) {
+      const target = await this.prisma.students.findUnique({
+        where: { id: dto.matchStudentId },
+        select: { branch_id: true, deleted_at: true },
+      });
+      if (!target || target.deleted_at || target.branch_id !== job.branch_id) {
+        throw new BadRequestException(
+          'The matched student is not in this import’s branch',
+        );
+      }
     }
 
     const parsed = {
@@ -268,17 +329,32 @@ export class ImportService {
    * a half-applied roster is worse than none, because the reviewer cannot tell
    * which half landed.
    */
+  /**
+   * F3b: `commit` no longer takes a body. The branch, year and historical flag
+   * are read from the `import_jobs` row the preview persisted, so a caller can
+   * neither retarget the commit at another branch/year nor flip `isHistorical`
+   * to make the promotion engine silently skip the imported rows. The job id is
+   * all that is needed.
+   */
   async commit(
     jobId: string,
-    dto: StartImportDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<ImportJobView> {
-    const job = await this.prisma.import_jobs.findUniqueOrThrow({
-      where: { id: jobId },
-    });
+    const job = await this.loadVisibleJob(jobId, viewer);
     if (job.committed_at) {
       throw new ConflictException('This import has already been committed');
     }
+    if (job.branch_id === null || job.academic_year_id === null) {
+      throw new BadRequestException(
+        'This import job is missing its branch or year; re-run the preview',
+      );
+    }
+    const targeting: CommitTargeting = {
+      branchId: job.branch_id,
+      academicYearId: job.academic_year_id,
+      isHistorical: job.is_historical,
+    };
 
     const rows = await this.prisma.import_rows.findMany({
       where: { import_job_id: jobId, action: { in: ['create', 'update'] } },
@@ -294,9 +370,9 @@ export class ImportService {
     await this.prisma.$transaction(async (tx) => {
       for (const row of rows) {
         if (job.import_type === 'roster') {
-          await this.applyRosterRow(tx, row, dto);
+          await this.applyRosterRow(tx, row, targeting);
         } else {
-          deferredCarries += await this.applyResultRow(tx, row, dto);
+          deferredCarries += await this.applyResultRow(tx, row, targeting);
         }
       }
       await tx.import_jobs.update({
@@ -311,13 +387,13 @@ export class ImportService {
       entityId: jobId,
       after: {
         appliedRows: rows.length,
-        isHistorical: dto.isHistorical,
+        isHistorical: targeting.isHistorical,
         // Non-zero means some carries are still waiting for next year's roster
         // to exist; re-running this import once it does will attach them.
         deferredCarries,
       },
     });
-    return this.getJob(jobId);
+    return this.getJob(jobId, viewer);
   }
 
   // ---------------------------------------------------------------- parsing
@@ -488,7 +564,7 @@ export class ImportService {
       match_student_id: string | null;
       action: string | null;
     },
-    dto: StartImportDto,
+    dto: CommitTargeting,
   ): Promise<void> {
     const parsed = row.parsed as {
       fullName: string;
@@ -558,7 +634,7 @@ export class ImportService {
   private async applyResultRow(
     tx: Prisma.TransactionClient,
     row: { parsed: Prisma.JsonValue; match_student_id: string | null },
-    dto: StartImportDto,
+    dto: CommitTargeting,
   ): Promise<number> {
     const parsed = row.parsed as {
       decision: 'promote' | 'promote_with_carry' | 'repeat';

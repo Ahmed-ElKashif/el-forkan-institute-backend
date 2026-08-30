@@ -13,10 +13,22 @@ import { PASSWORD_HASHER } from './interfaces/password-hasher.interface';
 import type { IPasswordHasher } from './interfaces/password-hasher.interface';
 import { TOKEN_SERVICE } from './interfaces/token.service.interface';
 import type { ITokenService } from './interfaces/token.service.interface';
+import {
+  LOCKOUT_DURATION_MS,
+  MAX_FAILED_LOGINS,
+  REFRESH_TOKEN_TTL_MS,
+} from './auth.constants';
 
-const MAX_FAILED_LOGINS = 5;
-const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
-const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// One message for every credential failure — an unknown user, a wrong password
+// and a locked account are indistinguishable to the caller (F9).
+const INVALID_CREDENTIALS = 'Invalid username or password';
+
+// A valid bcrypt hash (cost 12) of a value no one knows. Comparing against it
+// when the username does not exist makes the failed-login path cost the same
+// bcrypt work as the success path, so response time is not an existence oracle
+// (F9). The value it hashes is irrelevant; it never matches a real password.
+const DUMMY_PASSWORD_HASH =
+  '$2b$12$7G6alC67tD4qxFFgLjE7X.MloiHqqKN47Cf7pWrq5kZHzXQ.Xz9zm';
 
 export interface AuthTokens {
   accessToken: string;
@@ -45,25 +57,38 @@ export class AuthService {
     const user = await this.usersRepository.findByUsername(username);
 
     if (!user || user.deleted_at) {
-      throw new UnauthorizedException('Invalid username or password');
+      // Pay the bcrypt cost even for an unknown user so timing cannot tell the
+      // attacker the username exists (F9).
+      await this.passwordHasher.verify(password, DUMMY_PASSWORD_HASH);
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
 
-    if (user.locked_until && user.locked_until > new Date()) {
-      throw new ForbiddenException(
-        'Account temporarily locked. Try again later.',
-      );
-    }
+    const isLocked =
+      user.locked_until !== null && user.locked_until > new Date();
 
     const passwordValid = await this.passwordHasher.verify(
       password,
       user.password_hash,
     );
 
-    if (!passwordValid) {
-      await this.registerFailedLogin(user.id, user.failed_logins);
-      throw new UnauthorizedException('Invalid username or password');
+    // A locked account returns the same generic 401 as a wrong password rather
+    // than a distinguishing 403, so lockout status is not an enumeration oracle
+    // (F9). A wrong password against a locked account still counts, so the lock
+    // is not a window in which brute force is free.
+    if (isLocked) {
+      if (!passwordValid) {
+        await this.registerFailedLogin(user.id, user.failed_logins);
+      }
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
 
+    if (!passwordValid) {
+      await this.registerFailedLogin(user.id, user.failed_logins);
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
+    }
+
+    // Reachable only after a correct password, so this is not a guessing oracle
+    // — it keeps its own message to explain a deliberate administrative state.
     if (!user.is_active) {
       throw new ForbiddenException('Account is inactive');
     }

@@ -16,8 +16,8 @@ exams, promotion, certificates and WhatsApp reminders.
 ![Prisma](https://img.shields.io/badge/Prisma-7-0A665C?style=for-the-badge&logo=prisma&logoColor=white)
 ![Postgres](https://img.shields.io/badge/Supabase-Postgres-084F47?style=for-the-badge&logo=supabase&logoColor=white)
 
-![Routes](https://img.shields.io/badge/routes-115-C5852D?style=for-the-badge)
-![Tests](https://img.shields.io/badge/tests-383_passing-C5852D?style=for-the-badge)
+![Routes](https://img.shields.io/badge/routes-117-C5852D?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-396_passing-C5852D?style=for-the-badge)
 ![Zod](https://img.shields.io/badge/validation-Zod-A76D24?style=for-the-badge)
 
 </div>
@@ -59,7 +59,7 @@ Arabic-first, right-to-left admin app
 
 | Domain | Highlights |
 |---|---|
-| **Auth** | JWT access tokens (15 min) + opaque, peppered refresh tokens · CSRF double-submit · per-IP+username login throttle (5/min) |
+| **Auth** | JWT access tokens (15 min, algorithm/issuer/audience-pinned) + opaque, peppered refresh tokens · CSRF double-submit · per-IP+username login throttle (5/min) · self-service + head-teacher password reset |
 | **Users & students** | Role-scoped access, Arabic name normalisation, `national_id` encrypted at rest (AES-256-GCM) |
 | **Calendar** | Hijri ↔ Gregorian year planner, terms, holidays |
 | **Curriculum** | Year → level → subject → term tree, scores and weights |
@@ -84,7 +84,9 @@ npm run start:dev             # http://localhost:3000
 Health check: `GET /health` → `{ "status": "ok", "timestamp": … }`
 
 Seeded head teacher for local work: `headteacher` / `ChangeMe123!`
-([prisma/seed-head-teacher.ts](prisma/seed-head-teacher.ts)).
+([prisma/seed-head-teacher.ts](prisma/seed-head-teacher.ts)). **Rotate it in any
+shared environment** via `POST /users/me/password` — the default is a known
+static credential.
 
 > [!WARNING]
 > Both Postgres URLs need `sslmode=no-verify`, **not** `require` — newer
@@ -93,9 +95,16 @@ Seeded head teacher for local work: `headteacher` / `ChangeMe123!`
 
 ### Environment
 
-Every key in [.env.example](.env.example) is required except `REFRESH_TOKEN_PEPPER`
-and the WhatsApp credentials (sending stays inert without them — campaigns
-queue instead of failing).
+Config is **validated at boot** ([src/config/env.ts](src/config/env.ts)): the
+process refuses to start if `JWT_ACCESS_SECRET` (≥32 chars), `CSRF_SECRET`
+(≥16), `FIELD_ENCRYPTION_KEY`, `DATABASE_URL` or — in production — `CORS_ORIGIN`
+is missing, with one aggregated error naming every offender. `REFRESH_TOKEN_PEPPER`
+and the WhatsApp credentials stay optional (sending stays inert without them —
+campaigns queue instead of failing).
+
+`CORS_ORIGIN` is a fail-closed, comma-separated allowlist (no `*` fallback).
+Cookie `Secure` defaults **on**; set `COOKIE_SECURE=false` for local HTTP dev, or
+the browser drops the refresh cookie.
 
 Generate the two crypto keys:
 
@@ -127,8 +136,11 @@ Idempotency lives in the database, not a queue: `message_campaigns` is UNIQUE
 on `(template, section, date)` and `job_runs` on `(job_name, run_key)` — claimed
 before the work starts. Full reasoning in [agent/architecture.md](agent/architecture.md).
 
-**Hardened by default:** `helmet` · `cors` (credentialed) · `hpp` ·
-`cookie-parser` · global `ZodValidationPipe` with `.strict()` schemas.
+**Hardened by default:** boot-time env validation · `helmet` (CSP +
+`frame-ancestors`/`base-uri 'none'`) · fail-closed `cors` allowlist
+(credentialed) · `hpp` · `cookie-parser` · global `ZodValidationPipe` with
+`.strict()` schemas · branch scoping enforced in every service (`viewer`
+threaded through the data layer, not the controller).
 
 ---
 
@@ -137,15 +149,16 @@ before the work starts. Full reasoning in [agent/architecture.md](agent/architec
 | Prefix | Routes | | Prefix | Routes |
 |---|--:|---|---|--:|
 | `/auth` | 4 | | `/sections`, `/enrollments` | 10 |
-| `/users` | 6 | | `/sessions`, teaching | 9 |
+| `/users` | 8 | | `/sessions`, teaching | 9 |
 | `/students` | 8 | | assessment & certificates | 21 |
 | reference & geography | 19 | | `/reports` | 5 |
 | calendar & curriculum | 12 | | messaging | 6 |
 | `/settings` | 7 | | `/imports`, `/exports` | 7 |
 
-Plus `GET /health`. Routes with no `@Roles()` are open to any authenticated user;
-`@Roles('head_teacher')` guards anything that destroys data, rewrites history, or
-changes the rules — **54 of the 115**.
+Plus `GET /health`. Routes with no `@Roles()` are open to any authenticated user
+**but branch-scoped in the service layer** (a teacher only ever sees their own
+branch's data); `@Roles('head_teacher')` guards anything that destroys data,
+rewrites history, or changes the rules — **55 of the 117**.
 
 ### Two roles, and only two
 
@@ -161,7 +174,7 @@ changes the rules — **54 of the 115**.
 Two tiers — Jest for pure logic, live smoke suites for the wiring.
 
 ```bash
-npm test          # 383 unit tests, 29 suites
+npm test          # 396 unit tests, 30 suites
 npm run test:cov  # coverage
 ```
 
@@ -188,6 +201,57 @@ Smoke suites drive the real HTTP API against the live database — see
 | `npm run build` | `nest build` |
 | `npm run lint` | ESLint `--fix` |
 | `npm run format` | Prettier |
+| `npm run db:migrate` | Apply pending migrations (`prisma migrate deploy`) |
+| `npm run db:migrate:status` | Show which migrations are applied |
+| `npm run db:migrate:new -- <name>` | Scaffold the next migration from schema changes |
+| `npm run db:manual` | Emergency repair: re-create the partial unique indexes a stray `db push` dropped |
+
+---
+
+## Database & migrations
+
+[`prisma/schema.prisma`](prisma/schema.prisma) is the source of truth for the
+Prisma client; [`prisma/migrations/`](prisma/migrations) is the source of truth
+for the database. The `0_init` baseline reproduces the full production schema —
+39 tables, 104 foreign keys, 21 enums, **28 CHECK constraints and 2 partial
+unique indexes** — and is marked as already-applied on the existing database, so
+it only ever runs against a fresh one. It was verified by replaying it into a
+throwaway schema and diffing the result against production.
+
+**Changing the schema**
+
+```bash
+# 1. edit prisma/schema.prisma, then:
+npm run db:migrate:new -- add-something   # writes prisma/migrations/<ts>_add_something/
+# 2. REVIEW the generated SQL (a rename reads as DROP + ADD and would lose data)
+npm run db:migrate                        # apply it
+npx prisma generate                       # refresh the client
+```
+
+> [!CAUTION]
+> **Never run `prisma db push` on this database.** Prisma cannot express a
+> partial unique index, so a push silently *drops* the two that guarantee one
+> live certificate per student/level and one primary teacher per section — it did
+> exactly that on 2026-08-30. If it happens again, repair with `npm run db:manual`.
+>
+> For the same reason every `migrate diff` reports those two indexes as drift and
+> tries to `DROP` them. `db:migrate:new` strips those statements for you and says
+> so; if you ever hand-write a migration, do not re-add them.
+
+A Render Blueprint ships in [`render.yaml`](render.yaml) — import this repo,
+then fill the `sync: false` secrets in the dashboard.
+
+Migrations apply automatically on deploy — `prisma migrate deploy` runs in the
+build command, before the new code goes live.
+
+> [!IMPORTANT]
+> `COOKIE_SAMESITE` decides whether the refresh cookie survives after deploy. On
+> two separate `*.onrender.com` subdomains the API and SPA are cross-site, so it
+> must be `none` (the blueprint's default); under one registrable domain leave it
+> `strict`. Get this wrong and login works while every refresh silently fails.
+
+Full two-service runbook and the exit test: the frontend repo's
+[`DEPLOY.md`](https://github.com/Ahmed-ElKashif/el-forkan-institute-frontend/blob/main/DEPLOY.md).
 
 ---
 
@@ -206,8 +270,9 @@ Living documents, kept current as the build moves:
 
 <div align="center">
 
-**Status:** backend Phases 0–6 complete · 115 routes live.<br/>
-Frontend is at F0b — sign-in and session working.
+**Status:** backend Phases 0–6 complete · 117 routes live · external security
+review remediated.<br/>
+Frontend is at F0c — sign-in, session and the role-scoped app frame working.
 [See the frontend repo →](https://github.com/Ahmed-ElKashif/el-forkan-institute-frontend)
 
 <sub>دورات الفرقان التثقيفية · El Forkan Institute</sub>
