@@ -13,6 +13,8 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import { CurrentActor } from '../common/actor.decorator';
 import type { Actor } from '../common/actor.decorator';
 import { Page } from '../common/pagination';
@@ -49,21 +51,26 @@ export class ImportController {
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() dto: StartImportDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ImportJobView> {
-    return this.imports.preview(assertXlsx(file), dto, actor);
+    return this.imports.preview(assertXlsx(file), dto, actor, viewer);
   }
 
   @Get(':id')
-  getJob(@Param('id', ParseUUIDPipe) id: string): Promise<ImportJobView> {
-    return this.imports.getJob(id);
+  getJob(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<ImportJobView> {
+    return this.imports.getJob(id, viewer);
   }
 
   @Get(':id/rows')
   listRows(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: ListImportRowsQueryDto,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<Page<ImportRowView>> {
-    return this.imports.listRows(id, query);
+    return this.imports.listRows(id, query, viewer);
   }
 
   @Patch('rows/:rowId')
@@ -71,20 +78,22 @@ export class ImportController {
     @Param('rowId') rowId: string,
     @Body() dto: FixImportRowDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ImportRowView> {
-    return this.imports.fixRow(toRowId(rowId), dto, actor);
+    return this.imports.fixRow(toRowId(rowId), dto, actor, viewer);
   }
 
   // Separate from the upload on purpose: §6.3's whole point is that a human
-  // looks at the preview between the two.
+  // looks at the preview between the two. The commit takes no body: its branch,
+  // year and historical flag come from the persisted job, not the request (F3b).
   @Post(':id/commit')
   @Throttle(IMPORT_RATE_LIMIT)
   commit(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: StartImportDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ImportJobView> {
-    return this.imports.commit(id, dto, actor);
+    return this.imports.commit(id, actor, viewer);
   }
 }
 

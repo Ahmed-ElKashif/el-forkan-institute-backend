@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
-import { NewPasswordSchema } from '../../common/password.schema';
+import {
+  NewPasswordSchema,
+  PasswordSchema,
+} from '../../common/password.schema';
 import { PageQuerySchema } from '../../common/pagination';
 import { PhoneSchema } from '../../common/phone';
 
@@ -56,6 +59,29 @@ export const ListUsersQuerySchema = PageQuerySchema.extend({
   includeInactive: z.stringbool().default(false),
 }).strict();
 
+// F10: self-service password change. The current password is required — a
+// stolen access token alone must not be enough to lock the real owner out by
+// changing their password. It is validated only for presence (PasswordSchema),
+// not strength: an old account may predate the strength rule.
+export const ChangePasswordSchema = z
+  .object({
+    currentPassword: PasswordSchema,
+    newPassword: NewPasswordSchema,
+  })
+  .strict()
+  .refine((value) => value.currentPassword !== value.newPassword, {
+    message: 'The new password must differ from the current one',
+    path: ['newPassword'],
+  });
+
+// F10: head-teacher-initiated reset of another user's password, so a
+// compromised teacher account can be rotated without recreating it.
+export const ResetPasswordSchema = z
+  .object({ newPassword: NewPasswordSchema })
+  .strict();
+
 export class CreateUserDto extends createZodDto(CreateUserSchema) {}
 export class UpdateUserDto extends createZodDto(UpdateUserSchema) {}
+export class ChangePasswordDto extends createZodDto(ChangePasswordSchema) {}
+export class ResetPasswordDto extends createZodDto(ResetPasswordSchema) {}
 export class ListUsersQueryDto extends createZodDto(ListUsersQuerySchema) {}

@@ -72,13 +72,19 @@ function buildService(stored: UserRecord | null) {
   } as unknown as UsersRepository;
   const audit = { record: recordAudit } as unknown as AuditService;
   const hasher = { hash, verify: jest.fn() } as unknown as IPasswordHasher;
+  // Only refresh_tokens is exercised here — a password change revokes sessions.
+  const revokeSessions = jest.fn(() => Promise.resolve({ count: 0 }));
+  const prisma = {
+    refresh_tokens: { updateMany: revokeSessions },
+  } as unknown as import('../prisma/prisma.service').PrismaService;
 
   return {
-    service: new UsersService(repository, audit, hasher),
+    service: new UsersService(repository, audit, prisma, hasher),
     create,
     softDelete,
     recordAudit,
     hash,
+    revokeSessions,
   };
 }
 

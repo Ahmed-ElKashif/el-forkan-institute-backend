@@ -329,10 +329,14 @@ export class CampaignsService {
   async listCampaigns(viewer: AuthenticatedUser): Promise<CampaignView[]> {
     const campaigns = await this.prisma.message_campaigns.findMany({
       // §3: a teacher may "Trigger / view WhatsApp sends" for their own
-      // section only.
+      // section only. F11b: a branch-bound head teacher previously saw every
+      // branch's campaigns because this returned {} — now it is confined to
+      // their branch's sections, consistent with sectionScope.
       where:
         viewer.role === 'head_teacher'
-          ? {}
+          ? viewer.branchId === null
+            ? {}
+            : { sections: { branch_id: viewer.branchId } }
           : {
               sections: { section_teachers: { some: { user_id: viewer.id } } },
             },

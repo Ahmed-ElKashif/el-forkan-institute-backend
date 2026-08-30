@@ -27,6 +27,40 @@ function isHeadTeacher(viewer: AuthenticatedUser): boolean {
   return viewer.role === HEAD_TEACHER;
 }
 
+/**
+ * Whether this viewer may see or act on a row that lives in `branchId`.
+ *
+ * The branch axis on its own: an institute-wide viewer (`branchId === null`)
+ * sees every branch, a branch-bound one sees only its own. Used by modules that
+ * scope by branch alone — students, exams, imports — mirroring
+ * `StudentsService.findVisible`, which is the reference implementation for a
+ * branch-scoped read (spec §3, report F1/F3/F4).
+ */
+export function canAccessBranch(
+  viewer: AuthenticatedUser,
+  branchId: number,
+): boolean {
+  return viewer.branchId === null || viewer.branchId === branchId;
+}
+
+/**
+ * The branch a create should be written into, given the value the caller asked
+ * for. A branch-bound viewer may only ever create inside its own branch, so its
+ * request is ignored and its own branch is returned; an institute-wide viewer
+ * must name one, and may name any. Returns `null` to signal "the request is not
+ * allowed" so the caller can raise the error type its module uses (report
+ * F1/F4).
+ */
+export function resolveWritableBranch(
+  viewer: AuthenticatedUser,
+  requestedBranchId: number | null,
+): number | null {
+  if (viewer.branchId !== null) {
+    return viewer.branchId;
+  }
+  return requestedBranchId;
+}
+
 /** Restricts a query on `sections` to what this viewer may see. */
 export function sectionScope(
   viewer: AuthenticatedUser,

@@ -1,7 +1,9 @@
 import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import {
+  canAccessBranch,
   canAccessSection,
   enrollmentScope,
+  resolveWritableBranch,
   sectionScope,
 } from './access-scope';
 
@@ -110,5 +112,34 @@ describe('canAccessSection', () => {
     expect(canAccessSection(TEACHER_A, sectionRow(CAIRO, ['teacher-a']))).toBe(
       false,
     );
+  });
+});
+
+// The branch axis on its own — the check the assessment and import modules were
+// missing (report F1/F3/F4).
+describe('canAccessBranch', () => {
+  it('lets the institute-wide head teacher into any branch', () => {
+    expect(canAccessBranch(INSTITUTE_HEAD, ASWAN)).toBe(true);
+    expect(canAccessBranch(INSTITUTE_HEAD, CAIRO)).toBe(true);
+  });
+
+  it('lets a branch-bound viewer into their own branch only', () => {
+    expect(canAccessBranch(BRANCH_HEAD, ASWAN)).toBe(true);
+    expect(canAccessBranch(BRANCH_HEAD, CAIRO)).toBe(false);
+    expect(canAccessBranch(TEACHER_A, CAIRO)).toBe(false);
+  });
+});
+
+describe('resolveWritableBranch', () => {
+  // A branch-bound viewer's requested branch is ignored: they can only ever
+  // write into their own branch (F1/F4 create paths).
+  it('forces a branch-bound viewer to their own branch, whatever they asked for', () => {
+    expect(resolveWritableBranch(TEACHER_A, CAIRO)).toBe(ASWAN);
+    expect(resolveWritableBranch(BRANCH_HEAD, null)).toBe(ASWAN);
+  });
+
+  it('lets the institute-wide head teacher place a row in any branch, or none', () => {
+    expect(resolveWritableBranch(INSTITUTE_HEAD, CAIRO)).toBe(CAIRO);
+    expect(resolveWritableBranch(INSTITUTE_HEAD, null)).toBeNull();
   });
 });

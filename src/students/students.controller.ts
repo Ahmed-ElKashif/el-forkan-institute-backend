@@ -69,8 +69,9 @@ export class StudentsController {
   create(
     @Body() dto: CreateStudentDto,
     @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<StudentView> {
-    return this.students.create(dto, actor);
+    return this.students.create(dto, actor, viewer);
   }
 
   @Patch(':id')

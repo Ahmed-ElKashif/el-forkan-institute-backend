@@ -491,6 +491,121 @@ while the revoked one is kept.
 **Not started: the frontend.** Every backend endpoint the spec's Phases 0–6
 call for now exists — 115 routes.
 
+## Security review remediation (2026-08-30, external white-box review)
+
+A white-box source review (report.md) found the scope layer in `access-scope.ts`
+was a convention, not a mechanism: `assessment` and `import` held branch-scoped
+data behind routes any authenticated teacher could call. Fixed the confirmed
+findings; `nest build`, `eslint`, `tsc` and the suite (**396 tests, 30 suites**,
+up from 383) all green.
+
+Authorization (the core of the report — F1–F4):
+
+- **Assessment** (`exams`/`results`/`promotion` services + controller) now take a
+  `viewer` and scope every read/write by branch. Create paths force `branch_id`
+  to the viewer's branch (institute-wide head may still choose). New
+  `assertExamVisible` / `loadVisibleExam` / `assertStudentVisible` mirror
+  `StudentsService.findVisible`.
+- **Import** routes are branch-scoped via `loadVisibleJob`. `POST /imports/:id/commit`
+  **no longer takes a body** — branch, year and `isHistorical` are read from the
+  persisted job, closing the commit-time parameter-tampering path (F3b). `fixRow`
+  validates `matchStudentId` is in the job's branch (F3c).
+- **Score/attendance grids** re-validate every child `enrollmentId` against the
+  parent's eligible/active set — a correct section check was not enough on its
+  own (F2).
+- **Students** create/update pin `branch_id` so a teacher cannot create in, or
+  move a student to, another branch (F4).
+- Two new scope helpers, `canAccessBranch` / `resolveWritableBranch`, with unit
+  tests. (The report's §1.1 "make it structurally un-bypassable" and §1.9 full
+  route×role authorization matrix are noted as follow-ups, not done.)
+
+Hardening:
+
+- **Boot-time env validation** (`src/config/env.ts`): a missing/short
+  `JWT_ACCESS_SECRET`, `CSRF_SECRET`, `FIELD_ENCRYPTION_KEY`, `DATABASE_URL` or
+  (in prod) `CORS_ORIGIN` now aborts startup instead of 500-ing later (§1.3).
+  Removed the `as string` casts in `jwt-token.service` / `csrf.ts`.
+- **CORS** is a fail-closed comma-separated allowlist (F6). **Cookie `secure`**
+  defaults on; local HTTP dev opts out with `COOKIE_SECURE=false` (F7).
+- **JWT verify** pins algorithm/issuer/audience and parses the payload through a
+  Zod schema before it reaches `request.user` (F8).
+- **Login**: unknown user pays a dummy bcrypt compare; a locked account returns
+  the same generic 401 as a wrong password (no timing/lockout enumeration, F9).
+- **Password self-service**: `POST /users/me/password` (needs current password)
+  and `POST /users/:id/password` (head-teacher reset); both revoke all refresh
+  sessions (F10). Route count 115 → **117**.
+- `whatsapp_phone_number_id` constrained to numeric (F11c); campaign listing
+  branch-scoped (F11b); CSP adds `frame-ancestors`/`base-uri 'none'` (F11e).
+- Extracted `auth/auth.constants.ts` (§1.5); typed `role` as `user_role_t`
+  (§1.6); deleted `schema.prisma.bak` (§1.8).
+
+**Schema change** — added `import_jobs.is_historical` to `prisma/schema.prisma`
+(the source of truth) and ran `prisma generate`, so the client is current. There
+is no migrations folder and `prisma db push` would fight the hand-managed partial
+unique indexes, so apply the matching column to the live DB directly before
+deploying (`schema-v1.1.sql` is the original bootstrap DDL and is not maintained):
+
+```sql
+ALTER TABLE import_jobs ADD COLUMN is_historical boolean NOT NULL DEFAULT false;
+```
+
+**`db push` incident (same day).** The column was applied via `prisma db push`,
+which added it correctly but **silently dropped both partial unique indexes**
+Prisma can't represent (`certificates` one-live-per-student/level;
+`section_teachers` one-primary-per-section). CHECK constraints survived. Both
+indexes were recreated — no data violated them — and `npm run db:manual`
+(`prisma/tools/manual-objects.sql`) now repairs them idempotently.
+
+## Migration history introduced (2026-08-30)
+
+Prompted by the `db push` incident: the database had no migration history at all,
+so there was nothing to protect the objects Prisma cannot see.
+
+- **Toolchain fixed first.** The CLI had been upgraded to `prisma@8.0.0-rc.12`
+  while `@prisma/client` stayed at 7.10.0. Prisma 8 replaces everything with a
+  "contract" system — no `generate`, no `migrate`, no `db execute` — and could
+  not even read our `prisma.config.ts`. Pinned both back to **7.10.0**.
+- **`prisma/migrations/0_init`** — a hand-assembled baseline: `migrate diff
+  --from-empty --to-schema` output plus everything Prisma cannot emit
+  (`pgcrypto`/`pg_trgm` extensions, all 28 CHECK constraints with their real
+  names, and the 2 partial unique indexes).
+- **Verified, not assumed.** Replayed the baseline into a throwaway schema inside
+  a transaction and compared it to production: 39 tables, 104 FKs, 21 enums, 28
+  CHECKs, 2 partial uniques — exact match — then rolled back. Docker wasn't
+  running, hence the in-transaction approach.
+- Baselined prod with `migrate resolve --applied 0_init`; `migrate status` reports
+  "Database schema is up to date!".
+- **Workflow scripts**: `db:migrate` (deploy), `db:migrate:status`, and
+  `db:migrate:new -- <name>`. The last one diffs against the live DB because
+  `migrate dev` needs a shadow database Supabase's pooler won't grant, and it
+  **auto-strips the `DROP INDEX` statements** every diff emits for the two
+  partial uniques — the exact footgun that caused the incident.
+- `render.yaml` now runs `prisma migrate deploy` in the build command.
+- Helper scripts live in **`prisma/tools/`** (renamed from `prisma/sql/`, which
+  no longer described a folder holding two `.mjs` helpers).
+
+## Build fix — `start:prod` was broken (2026-08-30)
+
+Found while cleaning up stray `dist/` output. `tsconfig.build.json` set no
+`rootDir`, so TypeScript inferred it from every included file; the root-level
+`prisma.config.ts` pushed the common root to the project root and the entrypoint
+landed at `dist/src/main.js`. Both `npm run start:prod` and `render.yaml`'s
+`startCommand` run `node dist/main` — **a production boot would have failed
+immediately.** Pinned `"rootDir": "./src"` and excluded `prisma` /
+`prisma.config.ts`. Verified by booting the built bundle on a spare port and
+getting `{"status":"ok"}` from `/health` with every route mapped.
+
+That same exclusion stops `prisma/seed-head-teacher.ts` being compiled into the
+production bundle — it was shipping the hardcoded `ChangeMe123!` default, and
+nothing in `src/` imports it. Confirmed absent from `dist/` afterwards.
+
+Deliberately deferred (documented in the summary): §1.1 structural enforcement,
+§1.9 authz matrix e2e, F5 lockout-DoS redesign (needs new state), F2 composite
+FKs and F10 `must_change_password` (need migrations), and the non-security
+quality items (§1.2/1.4/1.7, global prefix, OpenAPI). The global prefix was
+skipped on purpose — it would break the existing frontend and the `/auth/refresh`
+CSRF-cookie path.
+
 ## Milestone 9 — Frontend scaffold — not started
 
 ## Milestone 10 — RTK Query — not started

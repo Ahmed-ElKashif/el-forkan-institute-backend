@@ -2,11 +2,15 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
+import { canAccessBranch } from '../common/access-scope';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
+import { branchScope } from '../common/branch-scope';
 import { PrismaService } from '../prisma/prisma.service';
 import { checkCompEntry } from '../rules/comp-gate';
+import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import {
   decideAfterMakeup,
   decidePromotion,
@@ -101,9 +105,14 @@ export class PromotionService {
    * The preview writes nothing. It is the same computation `confirm` replays,
    * so what the head teacher approves is what gets applied.
    */
-  async preview(dto: RunPromotionDto): Promise<PromotionPreviewRow[]> {
+  async preview(
+    dto: RunPromotionDto,
+    viewer: AuthenticatedUser,
+  ): Promise<PromotionPreviewRow[]> {
     const enrollments = await this.prisma.enrollments.findMany({
       where: {
+        // F1: a branch-bound head teacher runs promotion only over their branch.
+        ...branchScope(viewer.branchId),
         academic_year_id: dto.academicYearId,
         status: 'active',
         ...(dto.levelId ? { section: { level_id: dto.levelId } } : {}),
@@ -228,13 +237,16 @@ export class PromotionService {
   async confirm(
     dto: ConfirmPromotionDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<{
     applied: number;
     enrollmentsCreated: number;
     carriesWritten: number;
     notMovedForward: number;
   }> {
-    const previewed = await this.preview(dto);
+    // Replays the branch-scoped preview, so an enrolment outside the viewer's
+    // branch is never in `selected` and cannot be confirmed (F1).
+    const previewed = await this.preview(dto, viewer);
     const selected = previewed.filter((row) =>
       dto.enrollmentIds.includes(row.enrollmentId),
     );
@@ -421,7 +433,10 @@ export class PromotionService {
    * elective and student-chosen. It answers whether an enrolment the head
    * teacher is attempting is allowed, and says which condition failed.
    */
-  async checkCompEligibility(studentId: string): Promise<{
+  async checkCompEligibility(
+    studentId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<{
     allowed: boolean;
     refusal: string | null;
     pendingCarries: Array<{
@@ -430,6 +445,9 @@ export class PromotionService {
       levelId: number;
     }>;
   }> {
+    // F1: GET /students/:id/comp-eligibility leaked another branch's carry list.
+    await this.assertStudentVisible(studentId, viewer);
+
     const latestL4 = await this.prisma.enrollments.findFirst({
       where: {
         student_id: studentId,
@@ -471,9 +489,13 @@ export class PromotionService {
    * §4.5: "The natural UI is a 'ready to certify' list per level: students
    * whose enrollment reached promote or graduate with no certificate yet."
    */
-  async listCertifiable(levelId?: number): Promise<CertifiableStudent[]> {
+  async listCertifiable(
+    viewer: AuthenticatedUser,
+    levelId?: number,
+  ): Promise<CertifiableStudent[]> {
     const enrollments = await this.prisma.enrollments.findMany({
       where: {
+        ...branchScope(viewer.branchId),
         final_decision: { in: ['promote', 'graduate'] },
         section: {
           levels: {
@@ -531,7 +553,9 @@ export class PromotionService {
   async issueCertificate(
     dto: IssueCertificateDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<CertificateView> {
+    await this.assertStudentVisible(dto.studentId, viewer);
     const level = await this.prisma.levels.findUniqueOrThrow({
       where: { id: dto.levelId },
     });
@@ -628,6 +652,7 @@ export class PromotionService {
   async reprintCertificate(
     certificateId: string,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<CertificatePrintPayload> {
     const certificate = await this.prisma.certificates.findUniqueOrThrow({
       where: { id: certificateId },
@@ -639,6 +664,7 @@ export class PromotionService {
         users_certificates_issued_byTousers: { select: { full_name: true } },
       },
     });
+    this.assertCertificateBranchVisible(certificate.branch_id, viewer);
 
     if (certificate.revoked_at) {
       throw new ConflictException(
@@ -741,7 +767,13 @@ export class PromotionService {
     certificateId: string,
     reason: string,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<CertificateView> {
+    const existing = await this.prisma.certificates.findUniqueOrThrow({
+      where: { id: certificateId },
+      select: { branch_id: true },
+    });
+    this.assertCertificateBranchVisible(existing.branch_id, viewer);
     const updated = await this.prisma.certificates.update({
       where: { id: certificateId },
       data: {
@@ -763,9 +795,16 @@ export class PromotionService {
     return toCertificateView(updated);
   }
 
-  async listCertificates(studentId?: string): Promise<CertificateView[]> {
+  async listCertificates(
+    viewer: AuthenticatedUser,
+    studentId?: string,
+  ): Promise<CertificateView[]> {
     const rows = await this.prisma.certificates.findMany({
-      where: studentId ? { student_id: studentId } : {},
+      where: {
+        // F1: GET /certificates listed every branch's certificates.
+        ...branchScope(viewer.branchId),
+        ...(studentId ? { student_id: studentId } : {}),
+      },
       include: {
         students: { select: { full_name: true } },
         levels: { select: { code: true } },
@@ -773,6 +812,43 @@ export class PromotionService {
       orderBy: { issued_at: 'desc' },
     });
     return rows.map(toCertificateView);
+  }
+
+  /** Refuses if the student is outside the viewer's branch (F1). NotFound so a
+   * teacher cannot probe for students in other branches. */
+  private async assertStudentVisible(
+    studentId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<void> {
+    const student = await this.prisma.students.findUnique({
+      where: { id: studentId },
+      select: { branch_id: true, deleted_at: true },
+    });
+    // Mirrors StudentsService.findVisible: a branch-bound viewer sees only
+    // students in their own branch (an unassigned, null-branch student
+    // included, is not theirs).
+    if (
+      !student ||
+      student.deleted_at ||
+      (viewer.branchId !== null && student.branch_id !== viewer.branchId)
+    ) {
+      throw new NotFoundException('Student not found');
+    }
+  }
+
+  /** A certificate with no branch is institute-wide and only an institute-wide
+   * viewer may touch it; otherwise the branches must match (F1). */
+  private assertCertificateBranchVisible(
+    branchId: number | null,
+    viewer: AuthenticatedUser,
+  ): void {
+    const visible =
+      branchId === null
+        ? viewer.branchId === null
+        : canAccessBranch(viewer, branchId);
+    if (!visible) {
+      throw new NotFoundException('Certificate not found');
+    }
   }
 }
 

@@ -18,6 +18,7 @@ import type {
   ListUsersQueryDto,
   UpdateUserDto,
 } from './dto/user.schema';
+import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser, toPublicUser } from './users.mapper';
 import { UsersRepository } from './users.repository';
 
@@ -28,6 +29,7 @@ export class UsersService {
   constructor(
     private readonly usersRepository: UsersRepository,
     private readonly audit: AuditService,
+    private readonly prisma: PrismaService,
     @Inject(PASSWORD_HASHER) private readonly passwordHasher: IPasswordHasher,
   ) {}
 
@@ -136,6 +138,77 @@ export class UsersService {
       entityId: id,
       before: toPublicUser(before),
       after: { deleteReason: reason },
+    });
+  }
+
+  /**
+   * F10: a user changes their own password. The current password is required,
+   * so a stolen access token alone cannot be used to seize the account by
+   * resetting its password. Every other refresh session is revoked, so a token
+   * the attacker already holds stops working the moment the real owner rotates.
+   */
+  async changeOwnPassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    actor: Actor,
+  ): Promise<void> {
+    const user = await this.usersRepository.findById(userId);
+    if (!user || user.deleted_at || !user.is_active) {
+      throw new UnauthorizedException('Account no longer active');
+    }
+    const valid = await this.passwordHasher.verify(
+      currentPassword,
+      user.password_hash,
+    );
+    if (!valid) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+    await this.setPassword(userId, newPassword);
+    await this.audit.record(actor, {
+      action: 'user.password.change',
+      entityType: ENTITY_TYPE,
+      entityId: userId,
+    });
+  }
+
+  /**
+   * F10: the head teacher resets another user's password without recreating the
+   * account — the path for a compromised or forgotten teacher credential. All
+   * of that user's sessions are revoked.
+   */
+  async resetPassword(
+    id: string,
+    newPassword: string,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<void> {
+    const user = await this.findVisible(id, viewer);
+    await this.setPassword(user.id, newPassword);
+    await this.audit.record(actor, {
+      action: 'user.password.reset',
+      entityType: ENTITY_TYPE,
+      entityId: id,
+    });
+  }
+
+  private async setPassword(
+    userId: string,
+    newPassword: string,
+  ): Promise<void> {
+    const password_hash = await this.passwordHasher.hash(newPassword);
+    await this.usersRepository.update(userId, {
+      password_hash,
+      failed_logins: 0,
+      locked_until: null,
+      updated_at: new Date(),
+    });
+    // A password change ends every existing session: any refresh token still
+    // out there (including one an attacker holds) is revoked, so it cannot mint
+    // fresh access tokens after the rotation.
+    await this.prisma.refresh_tokens.updateMany({
+      where: { user_id: userId, revoked_at: null },
+      data: { revoked_at: new Date() },
     });
   }
 

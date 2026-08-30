@@ -1,13 +1,17 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { canAccessBranch, canAccessSection } from '../common/access-scope';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { resolveOutcome, weightedTermTotal } from '../rules/scoring';
+import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import type { CorrectScoreDto, SaveScoresDto } from './dto/assessment.schema';
 
 export interface ScoreRow {
@@ -56,12 +60,31 @@ export class ResultsService {
    * head teacher excluded (low attendance, already passed) does not appear
    * with an empty box inviting a mark.
    */
-  async getScoreGrid(examId: string): Promise<ScoreGrid> {
-    const exam = await this.prisma.exams.findUniqueOrThrow({
+  /**
+   * Loads an exam and refuses if the viewer's branch may not see it (F1).
+   * Returns the exam so a caller that needs it does not fetch it twice.
+   */
+  private async loadVisibleExam<T extends Prisma.examsInclude>(
+    examId: string,
+    viewer: AuthenticatedUser,
+    include: T,
+  ): Promise<Prisma.examsGetPayload<{ include: T }>> {
+    const exam = await this.prisma.exams.findUnique({
       where: { id: examId },
-      include: {
-        curriculum: { include: { subjects: { select: { name_ar: true } } } },
-      },
+      include,
+    });
+    if (!exam || !canAccessBranch(viewer, exam.branch_id)) {
+      throw new NotFoundException('Exam not found');
+    }
+    return exam;
+  }
+
+  async getScoreGrid(
+    examId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<ScoreGrid> {
+    const exam = await this.loadVisibleExam(examId, viewer, {
+      curriculum: { include: { subjects: { select: { name_ar: true } } } },
     });
 
     const eligible = await this.prisma.exam_eligibility.findMany({
@@ -110,15 +133,36 @@ export class ResultsService {
     examId: string,
     dto: SaveScoresDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<{ saved: number }> {
-    const exam = await this.prisma.exams.findUniqueOrThrow({
-      where: { id: examId },
-      include: { curriculum: true },
+    const exam = await this.loadVisibleExam(examId, viewer, {
+      curriculum: true,
     });
     if (exam.is_locked) {
       throw new ConflictException(
         'This exam is locked; a locked grade can only be changed by the head teacher, with a reason',
       );
+    }
+
+    // F2: the grid is built from `exam_eligibility` (getScoreGrid), but the save
+    // previously trusted whatever `enrollmentId`s the body carried, letting a
+    // teacher write a mark for any enrolment in any branch — and re-admit a
+    // student the head teacher had excluded. Re-check every child against the
+    // eligible set for THIS exam and reject anything outside it.
+    const eligibleIds = new Set(
+      (
+        await this.prisma.exam_eligibility.findMany({
+          where: { exam_id: examId, is_eligible: true },
+          select: { enrollment_id: true },
+        })
+      ).map((row) => row.enrollment_id),
+    );
+    for (const entry of dto.entries) {
+      if (!eligibleIds.has(entry.enrollmentId)) {
+        throw new BadRequestException(
+          'A submitted enrolment is not eligible for this exam; refresh the grid',
+        );
+      }
     }
 
     const marking = {
@@ -187,7 +231,9 @@ export class ResultsService {
     examId: string,
     isLocked: boolean,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<{ isLocked: boolean }> {
+    await this.loadVisibleExam(examId, viewer, {});
     const updated = await this.prisma.exams.update({
       where: { id: examId },
       data: { is_locked: isLocked, locked_at: isLocked ? new Date() : null },
@@ -212,6 +258,7 @@ export class ResultsService {
     resultId: string,
     dto: CorrectScoreDto,
     actor: Actor,
+    viewer: AuthenticatedUser,
   ): Promise<ScoreRow> {
     const before = await this.prisma.exam_results.findUniqueOrThrow({
       where: { id: resultId },
@@ -224,6 +271,11 @@ export class ResultsService {
         },
       },
     });
+    // F1: even a head teacher may be branch-bound; a correction must stay inside
+    // the branch that owns the exam.
+    if (!canAccessBranch(viewer, before.exams.branch_id)) {
+      throw new NotFoundException('Exam result not found');
+    }
 
     const marking = {
       maxScore: before.exams.curriculum.max_score.toNumber(),
@@ -301,7 +353,24 @@ export class ResultsService {
     sectionId: string,
     actor: Actor,
     finalize: boolean,
+    viewer: AuthenticatedUser,
   ): Promise<TermResultView[]> {
+    // F1: the section must be one the viewer may act on — same branch, and (for
+    // a teacher) actually assigned to them. Mirrors AttendanceService.
+    const section = await this.prisma.sections.findUnique({
+      where: { id: sectionId },
+      select: {
+        branch_id: true,
+        section_teachers: { select: { user_id: true } },
+      },
+    });
+    if (!section) {
+      throw new NotFoundException('Section not found');
+    }
+    if (!canAccessSection(viewer, section)) {
+      throw new ForbiddenException('This section is not assigned to you');
+    }
+
     const enrollments = await this.prisma.enrollments.findMany({
       where: { section_id: sectionId, status: 'active' },
       include: {

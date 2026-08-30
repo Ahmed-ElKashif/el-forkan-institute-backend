@@ -1,4 +1,23 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
+  "compilerOptions": {
+    // Pin the emit root to src/ so the entrypoint lands at dist/main.js, which
+    // is what `start:prod` (node dist/main) and render.yaml's startCommand run.
+    // Without this, TypeScript infers the root from every included file — the
+    // root-level prisma.config.ts dragged it up to the project root and emitted
+    // dist/src/main.js instead, so the production start command found nothing.
+    "rootDir": "./src"
+  },
+  "exclude": [
+    "node_modules",
+    "test",
+    "dist",
+    "**/*spec.ts",
+    // Everything below lives outside rootDir and is not part of the running
+    // app: the seed is a one-off admin script (compiling it also shipped a
+    // hardcoded default password into the bundle), prisma.config.ts is CLI-only
+    // configuration, and the prisma/tools helpers are plain .mjs dev scripts.
+    "prisma",
+    "prisma.config.ts"
+  ]
 }

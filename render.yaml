@@ -1,0 +1,60 @@
+# Render Blueprint for the El Forkan API.
+# Import this repo as a Blueprint in Render, then fill the `sync: false` secrets
+# in the dashboard. Full runbook: the frontend repo's DEPLOY.md (build plan F0d).
+#
+# Schema changes ship as migrations: `prisma migrate deploy` runs in the build
+# command below, applying anything pending in prisma/migrations before the new
+# code goes live. NEVER run `prisma db push` against this database — it drops the
+# two partial unique indexes Prisma cannot represent (see prisma/migrations/0_init).
+#
+# Env is validated at boot (src/config/env.ts): the process refuses to start
+# if JWT_ACCESS_SECRET (>=32 chars), CSRF_SECRET (>=16), FIELD_ENCRYPTION_KEY,
+# DATABASE_URL or (in production) CORS_ORIGIN is missing. Fill every sync:false
+# secret below with a real value, not a placeholder.
+services:
+  - type: web
+    name: el-forkan-api
+    runtime: node
+    plan: free # spins down when idle; upgrade for an always-on API
+    region: frankfurt # closest to Egypt of Render's regions
+    healthCheckPath: /health
+    # migrate deploy is idempotent and only applies migrations not yet recorded
+    # in _prisma_migrations; it never resets or reconciles the schema.
+    buildCommand: npm ci && npx prisma generate && npx prisma migrate deploy && npm run build
+    startCommand: npm run start:prod
+    # Render assigns PORT and the app already binds process.env.PORT.
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Two *.onrender.com subdomains are cross-site (onrender.com is a public
+      # suffix), so the refresh cookie needs SameSite=None to survive. If you
+      # move both services under one registrable domain, delete this line to
+      # fall back to the stricter default. See DEPLOY.md.
+      - key: COOKIE_SAMESITE
+        value: none
+      # The deployed SPA's origin (scheme + host, no trailing slash). Now a
+      # comma-separated allowlist — list staging and production together if
+      # needed. REQUIRED in production: the app fails closed and will not fall
+      # back to "*" (security review F6).
+      - key: CORS_ORIGIN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_JWKS_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: REFRESH_TOKEN_PEPPER
+        sync: false
+      - key: CSRF_SECRET
+        sync: false
+      - key: FIELD_ENCRYPTION_KEY
+        sync: false
