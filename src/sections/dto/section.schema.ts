@@ -84,6 +84,13 @@ export const ListEnrollmentsQuerySchema = PageQuerySchema.extend({
   status: z.enum(ENROLLMENT_STATUSES).optional(),
 }).strict();
 
+// Moving a student to another section — the "study year is wrong" correction.
+// Only the target section is named; the year, branch and gender are re-read from
+// it (like create), and the service refuses a cross-year or cross-gender move.
+export const TransferEnrollmentSchema = z
+  .object({ sectionId: z.uuid() })
+  .strict();
+
 export class CreateSectionDto extends createZodDto(CreateSectionSchema) {}
 export class UpdateSectionDto extends createZodDto(UpdateSectionSchema) {}
 export class ListSectionsQueryDto extends createZodDto(
@@ -92,6 +99,7 @@ export class ListSectionsQueryDto extends createZodDto(
 export class AssignTeacherDto extends createZodDto(AssignTeacherSchema) {}
 export class CreateEnrollmentDto extends createZodDto(CreateEnrollmentSchema) {}
 export class UpdateEnrollmentDto extends createZodDto(UpdateEnrollmentSchema) {}
+export class TransferEnrollmentDto extends createZodDto(TransferEnrollmentSchema) {}
 export class ListEnrollmentsQueryDto extends createZodDto(
   ListEnrollmentsQuerySchema,
 ) {}

@@ -16,6 +16,7 @@ import { Page } from '../common/pagination';
 import {
   CreateEnrollmentDto,
   ListEnrollmentsQueryDto,
+  TransferEnrollmentDto,
   UpdateEnrollmentDto,
 } from './dto/section.schema';
 import { EnrollmentView, SectionsService } from './sections.service';
@@ -52,5 +53,18 @@ export class EnrollmentsController {
     @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<EnrollmentView> {
     return this.sections.updateEnrollment(id, dto, actor, viewer);
+  }
+
+  // Correct a wrong study year by moving the student to another section (§5).
+  // `PATCH` cannot: the section is a composite-FK identity on the row. Both
+  // roles, scoped to sections the viewer can reach.
+  @Post(':id/transfer')
+  transfer(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TransferEnrollmentDto,
+    @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<EnrollmentView> {
+    return this.sections.transferEnrollment(id, dto, actor, viewer);
   }
 }

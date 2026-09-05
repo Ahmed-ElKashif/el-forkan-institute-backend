@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
+import { ArabicNameSchema } from '../../common/arabic-name.schema';
 import { PageQuerySchema } from '../../common/pagination';
 
 // §6.4 imports the roster sheets and the result sheets separately: they are
@@ -39,7 +40,9 @@ export const StartImportSchema = z
 // (§6.3). Only the fields a human can correct are editable.
 export const FixImportRowSchema = z
   .object({
-    fullName: z.string().trim().min(2).max(160).optional(),
+    // A reviewer-typed correction is held to the same letters-only rule as a
+    // student create/edit. The bulk staging parse stays lenient by design.
+    fullName: ArabicNameSchema.optional(),
     phone: z.string().trim().max(30).nullable().optional(),
     markazId: z.number().int().positive().nullable().optional(),
     matchStudentId: z.uuid().nullable().optional(),

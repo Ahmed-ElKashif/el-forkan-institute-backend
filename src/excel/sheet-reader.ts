@@ -33,6 +33,11 @@ export interface HeaderMatcher {
   /** Any of these header texts identifies the column, compared after Arabic
    * normalisation, so `الأسم` and `الاسم` both match. */
   aliases: string[];
+  /** Header texts whose *start* identifies the column, for headers that embed a
+   * level name that changes per file — `الإنتقال الى المستوى الثانى/الثالث/…`,
+   * `إجتاز بمواد من المستوى الأول/الثانى/…`. Compared after normalisation, and
+   * only when no alias matched exactly. */
+  prefixes?: string[];
   /** When true, a missing column makes the whole sheet unreadable. */
   required?: boolean;
 }
@@ -52,16 +57,27 @@ export function mapColumns(
 ): ColumnMap {
   const found: ColumnMap = new Map();
   const aliasIndex = new Map<string, string>();
+  const prefixIndex: Array<{ prefix: string; key: string }> = [];
   for (const matcher of matchers) {
     for (const alias of matcher.aliases) {
       aliasIndex.set(normalizeArabic(alias), matcher.key);
+    }
+    for (const prefix of matcher.prefixes ?? []) {
+      prefixIndex.push({ prefix: normalizeArabic(prefix), key: matcher.key });
     }
   }
 
   const searchRows = rows.slice(0, HEADER_SEARCH_ROWS);
   for (const row of searchRows) {
     row.forEach((cell, columnIndex) => {
-      const key = aliasIndex.get(normalizeArabic(cell));
+      const normalized = normalizeArabic(cell);
+      if (normalized.length === 0) return;
+      // Exact alias wins; a prefix only applies when no alias matched, so a
+      // constant header (مواد إعادة المستوى) is never captured by another
+      // column's level-prefixed header.
+      const key =
+        aliasIndex.get(normalized) ??
+        prefixIndex.find((entry) => normalized.startsWith(entry.prefix))?.key;
       // First match wins: a header repeated lower down (a merged continuation)
       // must not move the column.
       if (key !== undefined && !found.has(key)) {
@@ -72,7 +88,7 @@ export function mapColumns(
 
   const missing = matchers
     .filter((matcher) => matcher.required && !found.has(matcher.key))
-    .map((matcher) => matcher.aliases[0]);
+    .map((matcher) => matcher.aliases[0] ?? matcher.prefixes?.[0] ?? matcher.key);
   if (missing.length > 0) {
     throw new SheetLayoutError(
       `Sheet is missing required column(s): ${missing.join(', ')}`,

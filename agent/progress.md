@@ -610,3 +610,88 @@ CSRF-cookie path.
 
 ## Milestone 10 — RTK Query — not started
 
+## F12 — Email-OTP second factor ✅ done
+
+Staff now sign in with **email + password**, then a six-digit code emailed via
+Resend — MFA, not a single password.
+
+- Schema: new `otp_challenges` (hashed code, `expires_at`, `attempts`,
+  `consumed_at`) + migration `20260901000000_otp_challenges`. `users.email`
+  (already unique, nullable) is the login identity.
+- `OtpService` (new): mints a `crypto.randomInt` six-digit code, hashes it with
+  the existing bcrypt `IPasswordHasher`, verifies one guess under a 5-minute TTL
+  and a 5-attempt cap, and retires prior unconsumed challenges on each new login.
+  Raw code never stored.
+- `IEmailSender`/`EMAIL_SENDER` seam + `ResendEmailSender` (Resend SDK 6.x).
+  `RESEND_API_KEY` + `OTP_EMAIL_FROM` read from env at send time, never the DB —
+  same discipline as `WHATSAPP_ACCESS_TOKEN`. Documented in `.env.example`.
+- `AuthService`: `login` → `beginLogin` (password → challenge + email, **no
+  tokens**) and new `verifyOtp` (code → session). Generic-401 enumeration safety
+  preserved; `LoginThrottlerGuard` re-keyed IP+email; `login.schema` now email;
+  new `verify-otp.schema` (uuid + `^\d{6}$`).
+- Controller: `POST /auth/login` returns `{ mfaRequired, challengeId }`; new
+  `POST /auth/verify-otp` sets the refresh cookie and returns the session.
+- Frontend: two-step `LoginPage`, `AuthGateway.verifyOtp`, split
+  `beginSignIn`/`completeSignIn`, `InvalidOtpError`, Arabic strings.
+- Tests: `otp.service.spec` (5), `auth.service.spec` (4, real OtpService +
+  mocked boundaries), updated `login.schema`/gateway/service/App tests. Backend
+  408 jest green; frontend suite green.
+
+**Self-service password reset (same OTP mechanism).** `POST
+/auth/password-reset/request` + `/confirm`, guarded by `otp_challenges.purpose`
+('login' vs 'password_reset') so a reset code cannot complete a login. Confirm
+revokes every refresh token. Email is now **required** on user create (login
+identity); duplicate email/username/phone → 409. New migration
+`20260901000100_otp_challenge_purpose`. Frontend: `ResetPasswordPage`
+(`/reset-password`), "forgot password" link on login, `UserFormDialog` email
+required. Dev OTP fallback: when Resend is unset in non-production, the code is
+logged to the server console. Test account: `prisma/seed-head-teacher.ts` now
+sets email + password (override via `SEED_HT_EMAIL` / `SEED_HT_PASSWORD`).
+Backend 413 tests green; frontend suite green.
+
+**Operational follow-ups (flagged, not built):** the `.mjs` smoke scripts still
+use the old username+password one-step login and need a way to obtain the OTP
+(the dev console log, or a dev-only path) before they pass against MFA.
+
+
+**Student profile records (read).** `StudentRecordsService` (students module,
+DI: PrismaService + StudentsService) backs three reads on `StudentsController`:
+`GET /students/:id/enrollments` (timeline: section + level + status, hijri year
+resolved in one `academic_years` lookup), `/attendance` (status tallies via
+`groupBy` + a 20-row recent window), `/exam-results` (subject/term/score/verdict).
+Attendance and results are keyed by `enrollment_id`, so each query reaches them
+through `{ enrollments: { student_id } }`. Branch visibility is the one gate:
+`StudentsService.assertVisible` (extracted from `findVisible`), called before
+every record query. Tests: `student-records.service.spec` (4, mocked prisma
+boundary — tallies, decimal→number mapping, hijri join, scope refusal).
+
+**Attendance-risk on the roster + manual absence warning (§4.8).** `GET /students`
+list now carries per-student current-term absence data (`absences`, `warnAt`,
+`maxAbsences`, `attendanceRisk` 'none'|'warning'|'over') — resolved via the
+ongoing/latest term + the level's `attendance_policies` (per-level override else
+default). The profile's `attendanceSummary` gained a `position` (current-term
+absences vs thresholds + `warningSentAt`). New `POST /students/:id/absence-warning`
+→ `CampaignsService.warnStudentAbsence` records the `attendance_warnings`
+threshold (unique still prevents dupes) and sends the Arabic `absence_warning`
+template on demand, returning sent/queued/skipped/not_at_risk; degrades to
+`queued` when WhatsApp is not configured. Rate-limited like every send path.
+Tests: `campaigns.absence-warning.spec` (2 — not_at_risk, and record+send).
+
+**Demo seed expanded (`prisma/seed-demo.ts`).** Beyond the male section/students/
+sessions/attendance/exams, it now also seeds: a governorate+markaz (set on the
+demo students), a **female section + 3 girls** (roster group filter / R3), **2
+unenrolled students** (test "assign study year"), the `absence_warning` +
+`friday_reminder` templates, one placement, a timetable slot, and one issued
+certificate. Demo students get a phone + opt-in so the absence-warning path can
+message; DEMO-0004 lands at 4 absences → "over the limit" for the risk badge.
+All additions are find-or-create/upsert, so re-runs stay idempotent. Run it
+yourself: `npx ts-node prisma/seed-demo.ts` (it mutates the live DB).
+
+**Enrollment transfer (study-year correction).** `POST /enrollments/:id/transfer`
+(`SectionsService.transferEnrollment`, both roles, section-scoped) moves a
+student's enrollment to another section — the fix for a wrong year from the
+legacy import (or any later correction) that `PATCH /enrollments` can't do (the
+section is a composite-FK identity on the row). It keeps the enrollment id, so
+attendance and results stay attached; it re-reads branch from the target and
+refuses a cross-year (400) or cross-gender (409, R3) move. Tests:
+`sections.transfer.spec` (3 — move, cross-year refused, cross-gender refused).

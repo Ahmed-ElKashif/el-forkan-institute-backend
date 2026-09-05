@@ -1,12 +1,13 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { users as UserRecord } from '@prisma/client';
+import { Prisma, users as UserRecord } from '@prisma/client';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
 import { buildPage, Page } from '../common/pagination';
@@ -60,18 +61,7 @@ export class UsersService {
   }
 
   async create(dto: CreateUserDto, actor: Actor): Promise<PublicUser> {
-    const created = await this.usersRepository.create({
-      full_name: dto.fullName,
-      username: dto.username,
-      gender: dto.gender,
-      phone: dto.phone,
-      email: dto.email,
-      password_hash: await this.passwordHasher.hash(dto.password),
-      role: dto.role,
-      ...(dto.branchId === null
-        ? {}
-        : { branches: { connect: { id: dto.branchId } } }),
-    });
+    const created = await this.createRecord(dto);
 
     await this.audit.record(actor, {
       action: 'user.create',
@@ -80,6 +70,40 @@ export class UsersService {
       after: toPublicUser(created),
     });
     return toPublicUser(created);
+  }
+
+  /** Insert, turning a unique-constraint collision (email, username or phone —
+   *  all three are unique and all three are now login-relevant) into a 409 that
+   *  names the field, instead of a raw 500. */
+  private async createRecord(dto: CreateUserDto): Promise<UserRecord> {
+    try {
+      return await this.usersRepository.create({
+        full_name: dto.fullName,
+        username: dto.username,
+        gender: dto.gender,
+        phone: dto.phone,
+        email: dto.email,
+        password_hash: await this.passwordHasher.hash(dto.password),
+        role: dto.role,
+        ...(dto.branchId === null
+          ? {}
+          : { branches: { connect: { id: dto.branchId } } }),
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const fields = (error.meta?.target as string[] | undefined) ?? [];
+        const field = fields.includes('email')
+          ? 'email'
+          : fields.includes('username')
+            ? 'username'
+            : 'phone';
+        throw new ConflictException(`That ${field} is already in use`);
+      }
+      throw error;
+    }
   }
 
   async update(

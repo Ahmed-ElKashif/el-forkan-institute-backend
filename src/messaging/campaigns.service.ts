@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -54,6 +55,16 @@ export interface SendOutcome {
   sent: number;
   failed: number;
   skipped: number;
+}
+
+export type AbsenceWarningStatus = 'sent' | 'queued' | 'skipped' | 'not_at_risk';
+
+export interface AbsenceWarningResult {
+  /** sent = delivered · queued = recorded, integration not live · skipped = no
+   *  phone / opted out · not_at_risk = below the warn line. */
+  status: AbsenceWarningStatus;
+  absences: number;
+  threshold: number | null;
 }
 
 @Injectable()
@@ -497,6 +508,167 @@ export class CampaignsService {
       }
     }
     return { sent, failed, skipped };
+  }
+
+  /**
+   * Sends the Arabic absence warning to one student on demand (the profile's
+   * "warn now" button), rather than waiting for the scheduled sweep. Records the
+   * `attendance_warnings` row for the crossed threshold — the unique
+   * (enrollment, term, threshold) still prevents a duplicate — then queues and,
+   * if the integration is live, sends the message. `not_at_risk` when the
+   * student is below the warn line; `skipped` when they have no phone / opted
+   * out; `queued` when recorded but the WhatsApp integration is not configured.
+   */
+  async warnStudentAbsence(
+    studentId: string,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<AbsenceWarningResult> {
+    const enrollment = await this.prisma.enrollments.findFirst({
+      where: { student_id: studentId },
+      orderBy: { academic_year_id: 'desc' },
+      select: {
+        id: true,
+        branch_id: true,
+        academic_year_id: true,
+        section: { select: { level_id: true } },
+        student: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+            whatsapp_phone: true,
+            whatsapp_opt_in: true,
+          },
+        },
+      },
+    });
+    if (!enrollment) throw new NotFoundException('Student has no current enrollment');
+    if (viewer.branchId !== null && enrollment.branch_id !== viewer.branchId) {
+      throw new NotFoundException('Student not found');
+    }
+
+    const term = await this.currentTermWindow(enrollment.academic_year_id);
+    if (!term) throw new BadRequestException('No term to warn against');
+
+    const policies = await this.prisma.attendance_policies.findMany({
+      where: { academic_year_id: enrollment.academic_year_id },
+      select: { level_id: true, warn_at_absences: true, max_absences: true },
+    });
+    const policy =
+      policies.find((p) => p.level_id === enrollment.section.level_id) ??
+      policies.find((p) => p.level_id === null);
+    if (!policy) return { status: 'not_at_risk', absences: 0, threshold: null };
+
+    const absences = await this.prisma.attendance.count({
+      where: {
+        enrollment_id: enrollment.id,
+        status: 'absent',
+        sessions: { session_date: { gte: term.startsOn, lte: term.endsOn } },
+      },
+    });
+    const threshold =
+      absences >= policy.max_absences
+        ? policy.max_absences
+        : absences >= policy.warn_at_absences
+          ? policy.warn_at_absences
+          : null;
+    if (threshold === null) return { status: 'not_at_risk', absences, threshold: null };
+
+    const warning = await this.prisma.attendance_warnings.upsert({
+      where: {
+        enrollment_id_term_id_threshold: {
+          enrollment_id: enrollment.id,
+          term_id: term.id,
+          threshold,
+        },
+      },
+      create: {
+        enrollment_id: enrollment.id,
+        term_id: term.id,
+        threshold,
+        absence_count: absences,
+      },
+      update: { absence_count: absences },
+    });
+
+    const student = enrollment.student;
+    const phone = student.whatsapp_phone ?? student.phone;
+    if (!phone || !student.whatsapp_opt_in) {
+      return { status: 'skipped', absences, threshold };
+    }
+
+    const template = await this.prisma.message_templates.findUnique({
+      where: { code: 'absence_warning' },
+    });
+    if (!template?.is_active) return { status: 'skipped', absences, threshold };
+
+    const { body, missing } = renderTemplate(template.body, {
+      student_name: student.full_name,
+      count: String(absences),
+      max: String(policy.max_absences),
+    });
+    if (missing.length > 0) return { status: 'skipped', absences, threshold };
+
+    const settings = await this.prisma.institute_settings.findUniqueOrThrow({ where: { id: 1 } });
+    const message = await this.prisma.messages.create({
+      data: { student_id: student.id, phone, rendered_body: body, status: 'queued' },
+    });
+    await this.prisma.attendance_warnings.update({
+      where: { id: warning.id },
+      data: { message_id: message.id },
+    });
+
+    await this.audit.record(actor, {
+      action: 'student.absence_warning.send',
+      entityType: 'student',
+      entityId: student.id,
+      after: { absences, threshold },
+    });
+
+    if (!this.whatsapp.isConfigured(settings.whatsapp_phone_number_id)) {
+      return { status: 'queued', absences, threshold };
+    }
+
+    const result = await this.whatsapp.sendTemplate(
+      settings.whatsapp_phone_number_id as string,
+      {
+        to: toWhatsAppRecipient(phone),
+        templateName: template.provider_template_name ?? template.code,
+        languageCode: template.language,
+        bodyParameters: [body],
+      },
+    );
+    await this.prisma.messages.update({
+      where: { id: message.id },
+      data: {
+        status: result.status,
+        provider_message_id: result.providerMessageId,
+        error_code: result.errorCode,
+        error_message: result.errorMessage,
+        attempts: { increment: 1 },
+        sent_at: result.status === 'sent' ? new Date() : null,
+      },
+    });
+    return { status: result.status === 'sent' ? 'sent' : 'queued', absences, threshold };
+  }
+
+  /** The ongoing term of a year (today within it), else the latest. */
+  private async currentTermWindow(
+    yearId: number,
+  ): Promise<{ id: number; startsOn: Date; endsOn: Date } | null> {
+    const now = new Date();
+    const term =
+      (await this.prisma.terms.findFirst({
+        where: { academic_year_id: yearId, starts_on: { lte: now }, ends_on: { gte: now } },
+        select: { id: true, starts_on: true, ends_on: true },
+      })) ??
+      (await this.prisma.terms.findFirst({
+        where: { academic_year_id: yearId },
+        orderBy: { term_number: 'desc' },
+        select: { id: true, starts_on: true, ends_on: true },
+      }));
+    return term ? { id: term.id, startsOn: term.starts_on, endsOn: term.ends_on } : null;
   }
 
   private async phoneCoverage(sectionId: string) {

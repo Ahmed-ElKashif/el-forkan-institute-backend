@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
+import { ArabicNameSchema } from '../../common/arabic-name.schema';
 import { DateOnlySchema } from '../../common/date-only.schema';
 import { PageQuerySchema } from '../../common/pagination';
 import { PhoneSchema } from '../../common/phone';
@@ -25,7 +26,7 @@ const NationalIdSchema = z
 // would make the historical import impossible.
 export const CreateStudentSchema = z
   .object({
-    fullName: z.string().trim().min(2).max(160),
+    fullName: ArabicNameSchema,
     gender: z.enum(GENDERS),
     branchId: z.number().int().positive().nullable().default(null),
     // student_code is generated when omitted; §10 item 3 leaves the format to
@@ -56,6 +57,11 @@ export const ListStudentsQuerySchema = PageQuerySchema.extend({
   status: z.enum(STUDENT_STATUSES).optional(),
   branchId: z.coerce.number().int().positive().optional(),
   markazId: z.coerce.number().int().positive().optional(),
+  // A student's "study year" is the level of their enrollment in this year.
+  // levelId filters to students enrolled at that level; academicYearId overrides
+  // which year is "current" (defaults to the newest year, resolved server-side).
+  levelId: z.coerce.number().int().positive().optional(),
+  academicYearId: z.coerce.number().int().positive().optional(),
   // §6.4: teachers fill phone and markaz manually after the historical
   // import, so "who is still missing a number" is a working list.
   missingPhone: z.stringbool().default(false),

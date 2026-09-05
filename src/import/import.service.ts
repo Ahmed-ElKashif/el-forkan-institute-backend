@@ -59,25 +59,28 @@ const ROSTER_COLUMNS = [
 const RESULT_COLUMNS = [
   { key: 'serial', aliases: ['م', 'مسلسل'] },
   { key: 'name', aliases: ['الأسم', 'الاسم', 'اسم الطالب'], required: true },
+  // The real decision header names the destination level and so changes per
+  // file: «الإنتقال الى المستوى الثانى/الثالث/الرابع/التكميلى/الأول». Matched by
+  // its stable prefix; the plain aliases cover any simpler sheet.
   {
     key: 'decision',
     aliases: ['النتيجة', 'النتيجه', 'القرار', 'نتيجة المستوى'],
+    prefixes: ['الانتقال الى المستوى'],
     required: true,
   },
+  // «إجتاز بمواد من المستوى الأول/الثانى/…» — the carried-subjects list.
   {
     key: 'carrySubjects',
-    aliases: [
-      'إجتاز بمواد من المستوى',
-      'المواد المتبقية',
-      'مواد بمواد',
-      'إجتاز المستوى بمواد',
-    ],
+    aliases: ['المواد المتبقية', 'مواد بمواد', 'إجتاز المستوى بمواد'],
+    prefixes: ['اجتاز بمواد من المستوى'],
   },
   { key: 'repeatSubjects', aliases: ['مواد إعادة المستوى', 'مواد الإعادة'] },
-  // L3 أخوات only (§6.1) — carries that survived more than one promotion.
+  // L2 / L3 أخوات (§6.1) — carries that survived more than one promotion, in a
+  // «مواد من المستوى الأول/الثانى» column separate from this level's carries.
   {
     key: 'priorLevelSubjects',
-    aliases: ['مواد من المستوى الثانى', 'مواد من المستوى الأول'],
+    aliases: [],
+    prefixes: ['مواد من المستوى'],
   },
 ];
 
@@ -366,20 +369,30 @@ export class ImportService {
       );
     }
 
+    // Seed the student-code sequence once, before the transaction, so the apply
+    // loop allocates codes in memory instead of a findFirst per created row.
+    const allocateCode = await studentCodeAllocator(this.prisma);
+
     let deferredCarries = 0;
-    await this.prisma.$transaction(async (tx) => {
-      for (const row of rows) {
-        if (job.import_type === 'roster') {
-          await this.applyRosterRow(tx, row, targeting);
-        } else {
-          deferredCarries += await this.applyResultRow(tx, row, targeting);
+    await this.prisma.$transaction(
+      async (tx) => {
+        for (const row of rows) {
+          if (job.import_type === 'roster') {
+            await this.applyRosterRow(tx, row, targeting, allocateCode);
+          } else {
+            deferredCarries += await this.applyResultRow(tx, row, targeting);
+          }
         }
-      }
-      await tx.import_jobs.update({
-        where: { id: jobId },
-        data: { committed_at: new Date() },
-      });
-    });
+        await tx.import_jobs.update({
+          where: { id: jobId },
+          data: { committed_at: new Date() },
+        });
+      },
+      // A whole roster of per-row writes over the remote pooler does not fit in
+      // Prisma's default 5s interactive-transaction budget. All-or-nothing is the
+      // point of the transaction, so the fix is room, not splitting it.
+      { timeout: 60_000, maxWait: 15_000 },
+    );
 
     await this.audit.record(actor, {
       action: 'import.commit',
@@ -565,6 +578,7 @@ export class ImportService {
       action: string | null;
     },
     dto: CommitTargeting,
+    allocateCode: () => string,
   ): Promise<void> {
     const parsed = row.parsed as {
       fullName: string;
@@ -580,7 +594,7 @@ export class ImportService {
         ? (
             await tx.students.create({
               data: {
-                student_code: await nextStudentCode(tx),
+                student_code: allocateCode(),
                 full_name: parsed.fullName,
                 gender: parsed.gender,
                 branch_id: dto.branchId,
@@ -756,17 +770,26 @@ function toE164OrNull(raw: string): string | null {
   }
 }
 
-async function nextStudentCode(tx: Prisma.TransactionClient): Promise<string> {
+/**
+ * Reads the current highest `YYYY-NNNN` sequence once and returns an allocator
+ * that hands out the next code from memory on each call. Moving this out of the
+ * per-row loop is what keeps a large roster commit inside its transaction
+ * budget — the previous per-row findFirst was the query that timed out. Codes
+ * stay unique via the DB constraint; a concurrent create (rare for a one-off
+ * admin import) would abort the commit, exactly as the per-row version did.
+ */
+async function studentCodeAllocator(db: PrismaService): Promise<() => string> {
   const yearPrefix = String(new Date().getUTCFullYear());
-  const latest = await tx.students.findFirst({
+  const latest = await db.students.findFirst({
     where: { student_code: { startsWith: `${yearPrefix}-` } },
     orderBy: { student_code: 'desc' },
     select: { student_code: true },
   });
-  const lastSequence = latest
+  const parsed = latest
     ? Number.parseInt(latest.student_code.split('-')[1] ?? '0', 10)
     : 0;
-  return `${yearPrefix}-${String((Number.isNaN(lastSequence) ? 0 : lastSequence) + 1).padStart(4, '0')}`;
+  let sequence = Number.isNaN(parsed) ? 0 : parsed;
+  return () => `${yearPrefix}-${String(++sequence).padStart(4, '0')}`;
 }
 
 function countActions(
