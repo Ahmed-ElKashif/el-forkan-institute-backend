@@ -7,13 +7,22 @@ import {
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { OtpService } from './otp.service';
 import { CryptoModule } from './crypto.module';
 import { doubleCsrfProtection } from './csrf';
+import { EMAIL_SENDER } from './interfaces/email-sender.interface';
+import { ResendEmailSender } from './providers/resend-email-sender';
 
 @Module({
   imports: [CryptoModule, UsersModule],
   controllers: [AuthController],
-  providers: [AuthService],
+  // EMAIL_SENDER is bound here rather than in CryptoModule: it is a login-only
+  // seam (the OTP), not the cross-cutting crypto that UsersModule also needs.
+  providers: [
+    AuthService,
+    OtpService,
+    { provide: EMAIL_SENDER, useClass: ResendEmailSender },
+  ],
 })
 export class AuthModule implements NestModule {
   // /auth/refresh is the only cookie-authenticated route, so it's the only

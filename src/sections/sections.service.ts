@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -18,6 +19,7 @@ import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.in
 import type {
   AssignTeacherDto,
   CreateEnrollmentDto,
+  TransferEnrollmentDto,
   CreateSectionDto,
   ListEnrollmentsQueryDto,
   ListSectionsQueryDto,
@@ -373,6 +375,54 @@ export class SectionsService {
     });
     await this.audit.record(actor, {
       action: 'enrollment.update',
+      entityType: 'enrollment',
+      entityId: id,
+      before: toEnrollment(before),
+      after: toEnrollment(updated),
+    });
+    return toEnrollment(updated);
+  }
+
+  /**
+   * Moves a student to another section — the correction for a wrong study year
+   * (a legacy import filed them at the wrong level, or a later fix). Only the
+   * section changes; the enrollment id is kept, so its attendance and results
+   * stay attached. The move stays within the same academic year and gender: a
+   * different year is a different enrollment, and R3 forbids crossing genders.
+   * `branch_id` is re-read from the target so every composite FK keeps a
+   * matching pair.
+   */
+  async transferEnrollment(
+    id: string,
+    dto: TransferEnrollmentDto,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<EnrollmentView> {
+    const before = await this.prisma.enrollments.findUniqueOrThrow({
+      where: { id },
+      ...ENROLLMENT_SHAPE,
+    });
+    // The viewer must be able to reach both the current and the target section.
+    await this.findAccessible(before.section_id, viewer);
+    const target = await this.findAccessible(dto.sectionId, viewer);
+
+    if (target.id === before.section_id) return toEnrollment(before);
+    if (target.academic_year_id !== before.academic_year_id) {
+      throw new BadRequestException('A transfer must stay within the same academic year');
+    }
+    if (target.gender !== before.gender) {
+      throw new ConflictException(
+        `That section is ${target.gender}; a student of a different gender cannot be moved into it`,
+      );
+    }
+
+    const updated = await this.prisma.enrollments.update({
+      where: { id },
+      data: { section_id: target.id, branch_id: target.branch_id },
+      ...ENROLLMENT_SHAPE,
+    });
+    await this.audit.record(actor, {
+      action: 'enrollment.transfer',
       entityType: 'enrollment',
       entityId: id,
       before: toEnrollment(before),

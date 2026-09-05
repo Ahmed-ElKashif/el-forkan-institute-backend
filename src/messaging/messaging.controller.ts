@@ -15,6 +15,7 @@ import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.in
 import { CurrentActor } from '../common/actor.decorator';
 import type { Actor } from '../common/actor.decorator';
 import {
+  AbsenceWarningResult,
   CampaignsService,
   CampaignView,
   SendOutcome,
@@ -48,6 +49,18 @@ export class MessagingController {
     @CurrentActor() actor: Actor,
   ): Promise<TemplateView> {
     return this.templates.update(id, dto, actor);
+  }
+
+  // §4.8: warn one student on demand from their profile (the scheduled sweep
+  // sends the rest). Rate-limited like every other send path. Both roles.
+  @Post('students/:id/absence-warning')
+  @Throttle(SEND_RATE_LIMIT)
+  warnAbsence(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<AbsenceWarningResult> {
+    return this.campaigns.warnStudentAbsence(id, actor, viewer);
   }
 
   // §3: a teacher may "Trigger / view WhatsApp sends" for their own section.

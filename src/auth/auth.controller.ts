@@ -22,28 +22,81 @@ import { authCookieSecurity } from './cookie-security';
 import { Public } from './decorators/public.decorator';
 import { generateCsrfToken } from './csrf';
 import { LoginDto } from './dto/login.schema';
+import { VerifyOtpDto } from './dto/verify-otp.schema';
+import { PasswordResetRequestDto } from './dto/password-reset-request.schema';
+import { PasswordResetConfirmDto } from './dto/password-reset-confirm.schema';
 import { LoginThrottlerGuard } from './guards/login-throttler.guard';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  // First factor: password. Returns an OTP challenge, never a session — the
+  // refresh cookie is set only by verify-otp, so a stolen password alone opens
+  // nothing (F12).
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @UseGuards(LoginThrottlerGuard)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async login(
-    @Body() dto: LoginDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ) {
-    const result = await this.authService.login(dto.username, dto.password, {
+  async login(@Body() dto: LoginDto, @Req() req: Request) {
+    return this.authService.beginLogin(dto.email, dto.password, {
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+  }
+
+  // Second factor: the emailed code. This is the step that issues the session.
+  @Public()
+  @Post('verify-otp')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async verifyOtp(
+    @Body() dto: VerifyOtpDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.verifyOtp(
+      dto.challengeId,
+      dto.code,
+      { ipAddress: req.ip, userAgent: req.headers['user-agent'] },
+    );
     this.setRefreshCookie(res, result.refreshToken);
     return { accessToken: result.accessToken, user: result.user };
+  }
+
+  // Forgot-password, step one: email a reset code. Throttled and keyed on
+  // IP+email like login, so it cannot be used to spray addresses. Always 200
+  // with a challenge id, whether or not the email exists (no enumeration).
+  @Public()
+  @Post('password-reset/request')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(LoginThrottlerGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async requestPasswordReset(
+    @Body() dto: PasswordResetRequestDto,
+    @Req() req: Request,
+  ) {
+    return this.authService.requestPasswordReset(dto.email, {
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+  }
+
+  // Forgot-password, step two: a valid code sets the new password. 204 on
+  // success; the user then signs in normally.
+  @Public()
+  @Post('password-reset/confirm')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async confirmPasswordReset(
+    @Body() dto: PasswordResetConfirmDto,
+  ): Promise<void> {
+    await this.authService.confirmPasswordReset(
+      dto.challengeId,
+      dto.code,
+      dto.newPassword,
+    );
   }
 
   // Under /auth/refresh so the refresh cookie (Path=/auth/refresh) is

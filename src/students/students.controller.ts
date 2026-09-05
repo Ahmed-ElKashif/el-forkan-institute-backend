@@ -29,13 +29,22 @@ import {
   StudentsService,
   StudentView,
 } from './students.service';
+import {
+  AttendanceSummaryView,
+  EnrollmentHistoryView,
+  ExamResultView,
+  StudentRecordsService,
+} from './student-records.service';
 
 // Spec §3: registering students, editing profiles (including filling phone and
 // markaz after the historical import) and recording placement are all things a
 // teacher does — they are reversible and additive. Only deletion is restricted.
 @Controller('students')
 export class StudentsController {
-  constructor(private readonly students: StudentsService) {}
+  constructor(
+    private readonly students: StudentsService,
+    private readonly records: StudentRecordsService,
+  ) {}
 
   @Get()
   list(
@@ -102,6 +111,33 @@ export class StudentsController {
     @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<PlacementView[]> {
     return this.students.listPlacements(id, viewer);
+  }
+
+  // The three profile record panels. Reads only — both roles may view a student
+  // they can reach; the record services gate on the same branch visibility as
+  // the profile itself.
+  @Get(':id/enrollments')
+  enrollmentHistory(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<EnrollmentHistoryView[]> {
+    return this.records.enrollmentHistory(id, viewer);
+  }
+
+  @Get(':id/attendance')
+  attendanceSummary(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<AttendanceSummaryView> {
+    return this.records.attendanceSummary(id, viewer);
+  }
+
+  @Get(':id/exam-results')
+  examResults(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<ExamResultView[]> {
+    return this.records.examResults(id, viewer);
   }
 
   @Post(':id/placements')

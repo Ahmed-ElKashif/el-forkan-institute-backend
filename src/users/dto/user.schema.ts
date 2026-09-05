@@ -27,7 +27,10 @@ export const CreateUserSchema = z
       ),
     gender: z.enum(GENDERS),
     phone: PhoneSchema,
-    email: z.email().max(180).optional(),
+    // Required since F12: email is the login identity (staff sign in with it and
+    // the OTP is sent to it), so an account without one could never log in.
+    // Normalised to trimmed lowercase to match how login looks it up.
+    email: z.string().trim().toLowerCase().email().max(180),
     password: NewPasswordSchema,
     role: z.enum(ROLES).default('teacher'),
     // NULL means institute-wide (spec §3): only meaningful for a head teacher.
@@ -44,7 +47,7 @@ export const UpdateUserSchema = z
   .object({
     fullName: z.string().trim().min(2).max(120),
     phone: PhoneSchema,
-    email: z.email().max(180).nullable(),
+    email: z.string().trim().toLowerCase().email().max(180).nullable(),
     role: z.enum(ROLES),
     branchId: z.number().int().positive().nullable(),
     isActive: z.boolean(),

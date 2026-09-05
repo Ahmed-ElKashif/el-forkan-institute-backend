@@ -6,7 +6,14 @@
     // Without this, TypeScript infers the root from every included file — the
     // root-level prisma.config.ts dragged it up to the project root and emitted
     // dist/src/main.js instead, so the production start command found nothing.
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // Keep the incremental cache INSIDE dist. nest-cli's deleteOutDir wipes dist
+    // on every build; if the .tsbuildinfo lived beside this config (the default)
+    // it would survive that wipe, so the next build would see "outputs current"
+    // and emit nothing — an empty dist with exit 0, and `node dist/main` then
+    // fails with MODULE_NOT_FOUND. Co-locating it makes the cache and the
+    // outputs get deleted together, so they can never desync.
+    "tsBuildInfoFile": "./dist/tsconfig.build.tsbuildinfo"
   },
   "exclude": [
     "node_modules",

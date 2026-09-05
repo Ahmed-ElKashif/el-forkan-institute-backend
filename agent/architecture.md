@@ -117,13 +117,40 @@ vary independently (you could swap one without the other).
 ```
 AuthController        — HTTP only: routes, status codes, cookie get/set
   └─ AuthService       — orchestration: login/refresh/logout business logic
-       ├─ UsersRepository        (Milestone 4)
+       ├─ UsersRepository        (Milestone 4; findByEmail is the login identity)
+       ├─ OtpService             (F12 — email second factor, see below)
        ├─ IPasswordHasher token  (Milestone 4)
        ├─ ITokenService token    (Milestone 4)
+       ├─ IEmailSender (EMAIL_SENDER) — Resend, F12; bound in AuthModule, not
+       │                                CryptoModule (login-only, not shared)
        └─ PrismaService          (Milestone 2, for refresh_tokens directly —
                                    no separate repository for that table yet,
                                    see below)
 ```
+
+**Two-factor login (F12).** Staff sign in with **email + password**, then a
+six-digit code emailed via Resend. `POST /auth/login` verifies the password and
+returns `{ mfaRequired, challengeId }` — **no tokens, no cookie**. `POST
+/auth/verify-otp` exchanges `{ challengeId, code }` for the session (this is the
+step that sets the refresh cookie). A stolen password alone therefore opens
+nothing. `OtpService` owns the `otp_challenges` lifecycle end to end (mint →
+hash with the bcrypt hasher → verify under a 5-minute TTL and a 5-attempt cap);
+the raw code is never stored, only its hash. `RESEND_API_KEY` / `OTP_EMAIL_FROM`
+live in env, never the database (mirrors the WhatsApp token); with them unset in
+non-production the code is logged to the console instead of emailed, so login is
+testable before a sending domain exists — production fails closed.
+
+**Same OTP, second use — password reset.** `POST /auth/password-reset/request`
+(email → a `password_reset` OTP, always 200 + a challenge id whether or not the
+email exists, so no enumeration) and `POST /auth/password-reset/confirm`
+(`{ challengeId, code, newPassword }` → new hash + **all refresh tokens
+revoked**). The `otp_challenges.purpose` column is the guard that a reset code
+— issued on email alone, no password — can never satisfy a login: `verify` is
+scoped to the purpose the challenge was minted for.
+
+**Email is required on user create** (`CreateUserSchema`) since it is the login
+identity; a duplicate email/username/phone now returns a 409 naming the field
+rather than a raw 500.
 
 **Why does `AuthController` never touch Prisma or bcrypt directly?** Same
 Single-Responsibility split as `AppController`/`AppService` from Milestone
@@ -173,7 +200,7 @@ Helmet/CORS/HPP are about *every* HTTP response leaving the process — they
 belong at the Express/Nest app level, applied once, no route ever opts out.
 Rate limiting has a sensible universal floor (protect the whole app from
 raw volume) *plus* a route where the generic floor isn't enough (login,
-specifically, needs username-aware tracking) — that's a global guard with a
+specifically, needs email-aware tracking) — that's a global guard with a
 route-level override, not a single number. CSRF is meaningful for exactly
 one route (the one cookie-authenticated endpoint) — scoping it globally
 would either do nothing useful on routes with no cookie auth, or actively

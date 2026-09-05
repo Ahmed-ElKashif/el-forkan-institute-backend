@@ -592,6 +592,29 @@ model refresh_tokens {
   @@index([user_id, family_id])
 }
 
+/// Second factor for staff login (F12): a hashed, single-use, short-lived
+/// email OTP. The raw code is never stored — only its bcrypt hash — so a
+/// database read cannot replay a login. One unconsumed challenge per user at a
+/// time (the service revokes prior ones on a fresh login).
+model otp_challenges {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id     String    @db.Uuid
+  /// 'login' or 'password_reset'. A reset code (issued on email alone, no
+  /// password) must never satisfy a login, so verify is scoped to the purpose
+  /// the challenge was minted for.
+  purpose     String    @default("login")
+  code_hash   String
+  expires_at  DateTime  @db.Timestamptz(6)
+  consumed_at DateTime? @db.Timestamptz(6)
+  attempts    Int       @default(0) @db.SmallInt
+  ip_address  String?   @db.Inet
+  user_agent  String?
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+  users       users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id])
+}
+
 model section_teachers {
   /// Partial unique index in the DB: UNIQUE (section_id) WHERE is_primary.
   /// Prisma can't express partial uniqueness on a scalar without corrupting
@@ -846,6 +869,7 @@ model users {
   institute_settings_institute_settings_updated_byTousers             institute_settings[]    @relation("institute_settings_updated_byTousers")
   institute_settings_institute_settings_whatsapp_owner_user_idTousers institute_settings[]    @relation("institute_settings_whatsapp_owner_user_idTousers")
   message_campaigns                                                   message_campaigns[]
+  otp_challenges                                                      otp_challenges[]
   placement_assessments_placement_assessments_created_byTousers       placement_assessments[] @relation("placement_assessments_created_byTousers")
   placement_assessments_placement_assessments_recommended_byTousers   placement_assessments[] @relation("placement_assessments_recommended_byTousers")
   progression_rules                                                   progression_rules[]

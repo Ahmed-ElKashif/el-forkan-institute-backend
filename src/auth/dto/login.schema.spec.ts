@@ -1,22 +1,36 @@
 import { LoginSchema } from './login.schema';
 
 describe('LoginSchema', () => {
-  it('accepts a valid username/password pair', () => {
+  it('accepts a valid email/password pair', () => {
     const result = LoginSchema.safeParse({
-      username: 'head_teacher',
+      email: 'head.teacher@example.com',
       password: 'correct-horse-battery-staple',
     });
     expect(result.success).toBe(true);
   });
 
-  it('rejects a missing username', () => {
-    const result = LoginSchema.safeParse({ password: 'something' });
+  it('normalises the email to trimmed lowercase', () => {
+    const result = LoginSchema.safeParse({
+      email: '  Head.Teacher@Example.COM  ',
+      password: 'correct-horse-battery-staple',
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.email).toBe(
+      'head.teacher@example.com',
+    );
+  });
+
+  it('rejects a value that is not an email', () => {
+    const result = LoginSchema.safeParse({
+      email: 'head_teacher',
+      password: 'something',
+    });
     expect(result.success).toBe(false);
   });
 
   it('rejects unknown extra fields (forbidNonWhitelisted equivalent)', () => {
     const result = LoginSchema.safeParse({
-      username: 'head_teacher',
+      email: 'head.teacher@example.com',
       password: 'something',
       role: 'head_teacher', // not a real field on the schema — must be rejected, not stripped silently
     });
@@ -25,7 +39,7 @@ describe('LoginSchema', () => {
 
   it('rejects a password over 72 ASCII bytes', () => {
     const result = LoginSchema.safeParse({
-      username: 'head_teacher',
+      email: 'head.teacher@example.com',
       password: 'a'.repeat(73),
     });
     expect(result.success).toBe(false);
@@ -39,7 +53,7 @@ describe('LoginSchema', () => {
     expect(Buffer.byteLength(arabicPassword, 'utf8')).toBeGreaterThan(72);
 
     const result = LoginSchema.safeParse({
-      username: 'head_teacher',
+      email: 'head.teacher@example.com',
       password: arabicPassword,
     });
     expect(result.success).toBe(false);

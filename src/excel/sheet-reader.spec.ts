@@ -164,6 +164,44 @@ describe('reading a real-shaped roster', () => {
   });
 });
 
+// §6.2: the result sheets' decision and carry headers embed the level name and
+// so change per file (الإنتقال الى المستوى الثانى/الثالث/…), while مواد إعادة
+// المستوى is constant. These are matched by prefix, and the constant header must
+// not be captured by the «مواد من المستوى» prior-level prefix.
+describe('mapColumns prefix matching', () => {
+  const RESULT_MATCHERS = [
+    { key: 'name', aliases: ['الأسم', 'الاسم'], required: true },
+    { key: 'decision', aliases: ['النتيجة'], prefixes: ['الانتقال الى المستوى'], required: true },
+    { key: 'carrySubjects', aliases: [], prefixes: ['اجتاز بمواد من المستوى'] },
+    { key: 'priorLevelSubjects', aliases: [], prefixes: ['مواد من المستوى'] },
+    { key: 'repeatSubjects', aliases: ['مواد إعادة المستوى'] },
+  ];
+
+  it('maps the level-varying headers by prefix and keeps the constant repeat column distinct', () => {
+    // The real المستوى الثاني header row: decision→L3, carries from L2, a
+    // prior-level column from L1, then the constant repeat column.
+    const headerRow = [
+      '',
+      'م',
+      'الأسم',
+      'الإنتقال الى المستوى الثالث',
+      'إجتاز بمواد من المستوى الثانى',
+      'مواد من المستوى الأول',
+      'مواد إعادة المستوى',
+    ];
+    const rows = [[], [], [], headerRow];
+
+    const columns = mapColumns(rows, RESULT_MATCHERS);
+
+    expect(columns.get('decision')).toBe(3);
+    expect(columns.get('carrySubjects')).toBe(4);
+    expect(columns.get('priorLevelSubjects')).toBe(5);
+    // The exact alias wins, so the constant repeat header is not swallowed by
+    // the «مواد من المستوى» prefix that its column also starts with.
+    expect(columns.get('repeatSubjects')).toBe(6);
+  });
+});
+
 // §9: "cap file size and row count, parse with a timeout".
 describe('loadWorkbook limits', () => {
   it('refuses a file over the size cap before parsing it', async () => {

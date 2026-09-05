@@ -17,6 +17,12 @@ export class UsersRepository {
     return this.prisma.users.findUnique({ where: { username } });
   }
 
+  // Login identity (F12). `email` is stored lowercase and the DTO normalises
+  // the input the same way, so this unique lookup is exact.
+  findByEmail(email: string) {
+    return this.prisma.users.findUnique({ where: { email } });
+  }
+
   findById(id: string) {
     return this.prisma.users.findUnique({ where: { id } });
   }

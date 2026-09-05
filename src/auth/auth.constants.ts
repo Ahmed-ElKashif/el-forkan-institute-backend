@@ -19,6 +19,16 @@ export const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_FAILED_LOGINS = 5;
 export const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 
+/**
+ * Email-OTP second factor (F12). The code is six digits, lives five minutes,
+ * and dies after five wrong guesses on one challenge — three limits that
+ * together keep the 10^6 code space out of reach of online brute force even
+ * before the per-account login throttle.
+ */
+export const OTP_CODE_LENGTH = 6;
+export const OTP_TTL_MS = 5 * 60 * 1000;
+export const OTP_MAX_ATTEMPTS = 5;
+
 /** Access-token lifetime and the claims pinned on verify (F8). */
 export const ACCESS_TOKEN_TTL = '15m';
 export const JWT_ALGORITHM = 'HS256' as const;
