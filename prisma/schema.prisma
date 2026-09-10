@@ -256,15 +256,16 @@ model enrollments {
   attendance                                                        attendance[]
   attendance_warnings                                               attendance_warnings[]
   carried_subjects_carried_subjects_enrollment_idToenrollments      carried_subjects[]    @relation("carried_subjects_enrollment_idToenrollments")
+  promotion_overrides                                               promotion_overrides[]
   carried_subjects_carried_subjects_from_enrollment_idToenrollments carried_subjects[]    @relation("carried_subjects_from_enrollment_idToenrollments")
   certificates                                                      certificates[]
   users_enrollments_created_byTousers                               users?                @relation("enrollments_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
   users_enrollments_decided_byTousers                               users?                @relation("enrollments_decided_byTousers", fields: [decided_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
   sections_enrollments_section_id_academic_year_idTosections        sections              @relation("enrollments_section_id_academic_year_idTosections", fields: [section_id, academic_year_id], references: [id, academic_year_id], onDelete: NoAction, onUpdate: NoAction)
   sections_enrollments_section_id_branch_idTosections               sections              @relation("enrollments_section_id_branch_idTosections", fields: [section_id, branch_id], references: [id, branch_id], onDelete: NoAction, onUpdate: NoAction)
-  section                         sections              @relation("enrollments_section_idTosections", fields: [section_id], references: [id], onUpdate: NoAction)
+  section                                                           sections              @relation("enrollments_section_idTosections", fields: [section_id], references: [id], onUpdate: NoAction)
   sections_enrollments_section_id_genderTosections                  sections              @relation("enrollments_section_id_genderTosections", fields: [section_id, gender], references: [id, gender], onDelete: NoAction, onUpdate: NoAction)
-  student                         students              @relation("enrollments_student_idTostudents", fields: [student_id], references: [id], onUpdate: NoAction)
+  student                                                           students              @relation("enrollments_student_idTostudents", fields: [student_id], references: [id], onUpdate: NoAction)
   students_enrollments_student_id_genderTostudents                  students              @relation("enrollments_student_id_genderTostudents", fields: [student_id, gender], references: [id, gender], onDelete: NoAction, onUpdate: NoAction)
   exam_eligibility                                                  exam_eligibility[]
   exam_results                                                      exam_results[]
@@ -558,6 +559,35 @@ model placement_assessments {
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// A human disagreeing with the promotion engine, on the record.
+///
+/// Why a table rather than a column on `enrollments`: `preview()` deliberately
+/// materialises nothing, so unlike `exam_eligibility` there is no computed row
+/// to overwrite in place. And `enrollments` already carries
+/// `final_decision`/`decided_at`/`decided_by`, which mean "the verdict that was
+/// committed" — a second decision column beside them would be two sources of
+/// truth for one fact.
+///
+/// `after_makeup` is part of the key because §4.3 computes a *different* verdict
+/// before and after the makeup round. An override recorded before the makeup
+/// must not silently re-decide the post-makeup run on stale reasoning.
+model promotion_overrides {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  enrollment_id String      @db.Uuid
+  after_makeup  Boolean     @default(false)
+  decision      decision_t
+  /// Mandatory, and never blank: it is what the audit log records, exactly as
+  /// the eligibility override's reason does.
+  reason        String
+  overridden_by String      @db.Uuid
+  overridden_at DateTime    @default(now()) @db.Timestamptz(6)
+  enrollments   enrollments @relation(fields: [enrollment_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users         users       @relation(fields: [overridden_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([enrollment_id, after_makeup])
+  @@index([enrollment_id])
+}
+
 model progression_rules {
   id                       Int            @id @default(autoincrement())
   academic_year_id         Int            @db.SmallInt
@@ -627,7 +657,7 @@ model section_teachers {
   assigned_at                                           DateTime @default(now()) @db.Timestamptz(6)
   sections_section_teachers_section_idTosections        sections @relation("section_teachers_section_idTosections", fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   sections_section_teachers_section_id_genderTosections sections @relation("section_teachers_section_id_genderTosections", fields: [section_id, gender], references: [id, gender], onDelete: NoAction, onUpdate: NoAction)
-  user                 users    @relation("section_teachers_user_idTousers", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user                                                  users    @relation("section_teachers_user_idTousers", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   users_section_teachers_user_id_genderTousers          users    @relation("section_teachers_user_id_genderTousers", fields: [user_id, gender], references: [id, gender], onDelete: NoAction, onUpdate: NoAction)
 
   @@id([section_id, user_id])
@@ -648,10 +678,10 @@ model sections {
   created_at                                                    DateTime            @default(now()) @db.Timestamptz(6)
   enrollments_enrollments_section_id_academic_year_idTosections enrollments[]       @relation("enrollments_section_id_academic_year_idTosections")
   enrollments_enrollments_section_id_branch_idTosections        enrollments[]       @relation("enrollments_section_id_branch_idTosections")
-  enrollments                  enrollments[]       @relation("enrollments_section_idTosections")
+  enrollments                                                   enrollments[]       @relation("enrollments_section_idTosections")
   enrollments_enrollments_section_id_genderTosections           enrollments[]       @relation("enrollments_section_id_genderTosections")
   message_campaigns                                             message_campaigns[]
-  section_teachers        section_teachers[]  @relation("section_teachers_section_idTosections")
+  section_teachers                                              section_teachers[]  @relation("section_teachers_section_idTosections")
   section_teachers_section_teachers_section_id_genderTosections section_teachers[]  @relation("section_teachers_section_id_genderTosections")
   academic_years                                                academic_years      @relation(fields: [academic_year_id], references: [id], onUpdate: NoAction)
   branches                                                      branches            @relation(fields: [branch_id], references: [id], onUpdate: NoAction)
@@ -660,7 +690,16 @@ model sections {
   sessions                                                      sessions[]
   timetable_slots                                               timetable_slots[]
 
-  @@unique([branch_id, academic_year_id, level_id, gender, name])
+  // R1 × R3: a level has many subjects but a single cohort per gender, so a
+  // level+gender owns exactly one class. `name` used to sit in this key, which
+  // let a level hold unlimited classes that differed only by label. Subjects
+  // reach students through `curriculum` (year, level, term), never through the
+  // class, so one class per level is enough to teach everything that level
+  // offers.
+  @@unique([branch_id, academic_year_id, level_id, gender])
+  // NOT business keys — these three are composite-FK targets that `enrollments`
+  // and `section_teachers` point at, and `[id, gender]` is what makes a mixed
+  // roster structurally impossible (§5.1). Do not tidy them away.
   @@unique([id, academic_year_id])
   @@unique([id, branch_id])
   @@unique([id, gender])
@@ -873,6 +912,7 @@ model users {
   placement_assessments_placement_assessments_created_byTousers       placement_assessments[] @relation("placement_assessments_created_byTousers")
   placement_assessments_placement_assessments_recommended_byTousers   placement_assessments[] @relation("placement_assessments_recommended_byTousers")
   progression_rules                                                   progression_rules[]
+  promotion_overrides                                                 promotion_overrides[]
   refresh_tokens                                                      refresh_tokens[]
   section_teachers_section_teachers_user_idTousers                    section_teachers[]      @relation("section_teachers_user_idTousers")
   section_teachers_section_teachers_user_id_genderTousers             section_teachers[]      @relation("section_teachers_user_id_genderTousers")

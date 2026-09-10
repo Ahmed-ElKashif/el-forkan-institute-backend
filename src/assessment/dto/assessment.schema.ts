@@ -91,6 +91,30 @@ export const CorrectScoreSchema = z
     path: ['score'],
   });
 
+/* The five verdicts §4.3 can reach. `decision_t` also carries `withdrawn`,
+   which is an enrolment status rather than a promotion outcome — offering it
+   here would let a run mark a student withdrawn without anyone withdrawing
+   them. */
+const PROMOTION_DECISIONS = [
+  'promote',
+  'promote_with_carry',
+  'repeat',
+  'makeup_required',
+  'graduate',
+] as const;
+
+// Mirrors OverrideEligibilitySchema: the reason is mandatory and held to a real
+// minimum, because it is what the audit log records.
+export const OverridePromotionSchema = z
+  .object({
+    decision: z.enum(PROMOTION_DECISIONS),
+    // The round this override belongs to; §4.3 decides differently either side
+    // of the makeup, so an override is scoped to one of them.
+    afterMakeup: z.boolean().default(false),
+    reason: z.string().trim().min(3).max(500),
+  })
+  .strict();
+
 export const RunPromotionSchema = z
   .object({
     academicYearId: z.number().int().positive(),
@@ -136,6 +160,9 @@ export class OverrideEligibilityDto extends createZodDto(
 export class SaveScoresDto extends createZodDto(SaveScoresSchema) {}
 export class CorrectScoreDto extends createZodDto(CorrectScoreSchema) {}
 export class RunPromotionDto extends createZodDto(RunPromotionSchema) {}
+export class OverridePromotionDto extends createZodDto(
+  OverridePromotionSchema,
+) {}
 export class ConfirmPromotionDto extends createZodDto(ConfirmPromotionSchema) {}
 export class IssueCertificateDto extends createZodDto(IssueCertificateSchema) {}
 export class RevokeCertificateDto extends createZodDto(

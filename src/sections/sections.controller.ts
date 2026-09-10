@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -14,6 +15,7 @@ import {
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
+import { resolveWritableBranch } from '../common/access-scope';
 import { CurrentActor } from '../common/actor.decorator';
 import type { Actor } from '../common/actor.decorator';
 import { Page } from '../common/pagination';
@@ -21,6 +23,7 @@ import {
   AssignTeacherDto,
   CreateSectionDto,
   ListSectionsQueryDto,
+  ProvisionSectionsDto,
   UpdateSectionDto,
 } from './dto/section.schema';
 import {
@@ -58,6 +61,25 @@ export class SectionsController {
     @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<PhoneCoverage> {
     return this.sections.phoneCoverage(id, viewer);
+  }
+
+  /* Creates the year's whole class list in one call — one per level per gender.
+     Ahead of `create` in the file because this is how classes are meant to come
+     into existence; `create` is the exception, not the rule. */
+  @Post('provision')
+  @Roles('head_teacher')
+  async provision(
+    @Body() dto: ProvisionSectionsDto,
+    @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<{ created: number; total: number }> {
+    const branchId = resolveWritableBranch(viewer, dto.branchId);
+    if (branchId === null) {
+      throw new BadRequestException(
+        'A branch is required: this account is not bound to one, so it must name the branch to provision',
+      );
+    }
+    return this.sections.provisionYear(dto.academicYearId, branchId, actor);
   }
 
   @Post()

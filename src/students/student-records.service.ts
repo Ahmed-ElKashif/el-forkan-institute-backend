@@ -69,6 +69,26 @@ export interface ExamResultView {
   result: string;
 }
 
+/** One subject carried forward from an earlier level (R13/R14). `cleared` means
+ *  the student has since passed it; `pending` still counts against R20's COMP
+ *  gate. */
+export interface CarriedSubjectView {
+  subjectId: number;
+  subjectName: string;
+  status: string;
+  clearedAt: string | null;
+}
+
+/** The debt from one earlier level, so the profile can say "one subject from
+ *  المستوى الأول, two from المستوى الثاني" the way the head teacher reads it off
+ *  the paper roster. */
+export interface CarriedSubjectGroupView {
+  originLevelId: number;
+  originLevelName: string;
+  originHijriYear: number | null;
+  subjects: CarriedSubjectView[];
+}
+
 /** How many recent sessions the attendance panel shows. */
 const RECENT_ATTENDANCE_WINDOW = 20;
 
@@ -296,6 +316,75 @@ export class StudentRecordsService {
       isAbsent: row.is_absent,
       result: row.result,
     }));
+  }
+
+  /**
+   * The subjects this student is carrying, grouped by the level they were
+   * failed at (R14: "a student can carry النحو alone").
+   *
+   * Grouped here rather than in the UI because the grouping key is a domain
+   * fact — a carry belongs to the level that produced it, and the year comes
+   * from `from_enrollment_id`, the enrolment where the failure happened, not
+   * the one now holding the debt.
+   *
+   * Cleared carries are returned alongside pending ones: the profile is a
+   * record, and "passed it in 1447" is exactly what the head teacher is looking
+   * for when a student asks why they are being let into COMP.
+   */
+  async carriedSubjects(
+    studentId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<CarriedSubjectGroupView[]> {
+    await this.students.assertVisible(studentId, viewer);
+
+    const enrollments = await this.prisma.enrollments.findMany({
+      where: { student_id: studentId },
+      select: { id: true },
+    });
+    const rows = await this.prisma.carried_subjects.findMany({
+      where: { enrollment_id: { in: enrollments.map((row) => row.id) } },
+      orderBy: [{ origin_level_id: 'asc' }],
+      select: {
+        subject_id: true,
+        status: true,
+        cleared_at: true,
+        origin_level_id: true,
+        subjects: { select: { name_ar: true } },
+        levels: { select: { name_ar: true } },
+        enrollments_carried_subjects_from_enrollment_idToenrollments: {
+          select: { academic_year_id: true },
+        },
+      },
+    });
+
+    const hijri = await this.hijriByYear(
+      rows.map(
+        (row) =>
+          row.enrollments_carried_subjects_from_enrollment_idToenrollments
+            .academic_year_id,
+      ),
+    );
+
+    const byLevel = new Map<number, CarriedSubjectGroupView>();
+    for (const row of rows) {
+      const originYear =
+        row.enrollments_carried_subjects_from_enrollment_idToenrollments
+          .academic_year_id;
+      const group = byLevel.get(row.origin_level_id) ?? {
+        originLevelId: row.origin_level_id,
+        originLevelName: row.levels.name_ar,
+        originHijriYear: hijri.get(originYear) ?? null,
+        subjects: [],
+      };
+      group.subjects.push({
+        subjectId: row.subject_id,
+        subjectName: row.subjects.name_ar,
+        status: row.status,
+        clearedAt: row.cleared_at ? row.cleared_at.toISOString() : null,
+      });
+      byLevel.set(row.origin_level_id, group);
+    }
+    return [...byLevel.values()];
   }
 
   /** Maps the given academic-year ids to their hijri year in one query. */

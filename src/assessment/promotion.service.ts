@@ -1,10 +1,15 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { canAccessBranch } from '../common/access-scope';
+import {
+  canAccessBranch,
+  canAccessSection,
+  sectionScope,
+} from '../common/access-scope';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
 import { branchScope } from '../common/branch-scope';
@@ -21,6 +26,7 @@ import {
 import type {
   ConfirmPromotionDto,
   IssueCertificateDto,
+  OverridePromotionDto,
   RunPromotionDto,
 } from './dto/assessment.schema';
 
@@ -35,7 +41,20 @@ export interface PromotionPreviewRow {
     nameAr: string;
     isMandatory: boolean;
   }>;
+  /** What will actually be written: the override if there is one, otherwise
+   *  {@link computedDecision}. Existing callers read this and are unaffected by
+   *  overrides existing. */
   decision: PromotionDecision;
+  /** What the engine worked out, always — so the screen can show the head
+   *  teacher what they are disagreeing with rather than hiding it. */
+  computedDecision: PromotionDecision;
+  /** The recorded disagreement, or null when the engine's verdict stands. */
+  override: {
+    decision: PromotionDecision;
+    reason: string;
+    overriddenBy: string;
+    overriddenAt: string;
+  } | null;
   /** Set when the row cannot be decided — a missing progression rule, or a
    * historical enrolment. Rows with a blocker are never written. */
   blocker: string | null;
@@ -111,15 +130,32 @@ export class PromotionService {
   ): Promise<PromotionPreviewRow[]> {
     const enrollments = await this.prisma.enrollments.findMany({
       where: {
-        // F1: a branch-bound head teacher runs promotion only over their branch.
-        ...branchScope(viewer.branchId),
         academic_year_id: dto.academicYearId,
         status: 'active',
-        ...(dto.levelId ? { section: { level_id: dto.levelId } } : {}),
+        /* ONE `section` key, deliberately.
+         *
+         * The scope is a filter on `section` too, and the level filter used to
+         * be spread in beside it as a second `section` key — which JavaScript
+         * resolves by letting the last one win. A teacher filtering by level
+         * would have silently lost their scope and previewed every enrolment at
+         * that level in the branch. Merging here is what keeps both predicates.
+         *
+         * `sectionScope` rather than `enrollmentScope`: the latter wraps the
+         * same fragment in `{ section: ... }`, which is the shape that caused
+         * the collision. It returns `{}` for an institute-wide head teacher, so
+         * that case still reads every branch (F1). */
+        section: {
+          ...sectionScope(viewer),
+          ...(dto.levelId ? { level_id: dto.levelId } : {}),
+        },
       },
       include: {
         student: { select: { full_name: true } },
         section: { include: { levels: true } },
+        // At most one row per round (UNIQUE enrollment_id, after_makeup), so the
+        // head teacher's verdict travels with the engine's rather than needing a
+        // second query per student.
+        promotion_overrides: { where: { after_makeup: dto.afterMakeup } },
         exam_results: {
           include: {
             exams: {
@@ -152,11 +188,16 @@ export class PromotionService {
       // §4.3: "never re-run the promotion engine over historical rows." The
       // 1447 decisions were made under looser rules than R17 now allows, and
       // re-deciding them would silently rewrite real students' records.
+      /* A blocked row carries no override, even if one exists. `confirm` refuses
+         blocked rows outright, so surfacing an override there would offer the
+         head teacher a decision the run will not honour. */
       if (enrollment.is_historical) {
         return {
           ...base,
           failedSubjects: [],
           decision: 'repeat' as PromotionDecision,
+          computedDecision: 'repeat' as PromotionDecision,
+          override: null,
           blocker:
             'Historical enrolment — imported from the old sheets and never re-decided',
         };
@@ -172,6 +213,8 @@ export class PromotionService {
           ...base,
           failedSubjects: [],
           decision: 'repeat' as PromotionDecision,
+          computedDecision: 'repeat' as PromotionDecision,
+          override: null,
           blocker: `No progression rule for level ${level.code}, and no year-wide fallback`,
         };
       }
@@ -197,6 +240,25 @@ export class PromotionService {
         mandatoryCanBeCarried: rule.mandatory_can_be_carried,
       };
 
+      const computedDecision = dto.afterMakeup
+        ? decideAfterMakeup(failed, levelRules, progressionRules)
+        : decidePromotion(failed, levelRules, progressionRules);
+
+      /* At most one, by UNIQUE (enrollment_id, after_makeup), and already
+         filtered to this round. The stored column is `decision_t`, which also
+         carries `withdrawn` — an enrolment status rather than a verdict; the
+         write DTO admits only the five promotion decisions, so nothing else can
+         reach this row. */
+      const [recorded] = enrollment.promotion_overrides;
+      const override = recorded
+        ? {
+            decision: recorded.decision as PromotionDecision,
+            reason: recorded.reason,
+            overriddenBy: recorded.overridden_by,
+            overriddenAt: recorded.overridden_at.toISOString(),
+          }
+        : null;
+
       return {
         ...base,
         failedSubjects: failedRows.map((row) => ({
@@ -204,12 +266,138 @@ export class PromotionService {
           nameAr: row.exams.curriculum.subjects.name_ar,
           isMandatory: row.exams.curriculum.is_mandatory,
         })),
-        decision: dto.afterMakeup
-          ? decideAfterMakeup(failed, levelRules, progressionRules)
-          : decidePromotion(failed, levelRules, progressionRules),
+        decision: override?.decision ?? computedDecision,
+        computedDecision,
+        override,
         blocker: null,
       };
     });
+  }
+
+  /**
+   * Loads one enrolment the viewer is allowed to write to, or refuses.
+   *
+   * NotFound outside the branch, Forbidden inside it but on someone else's
+   * class — the same distinction `SectionsService.findAccessible` draws, so a
+   * teacher cannot use the error to probe another branch's roster.
+   */
+  private async writableEnrollment(
+    enrollmentId: string,
+    viewer: AuthenticatedUser,
+  ): Promise<{ id: string; academic_year_id: number }> {
+    const enrollment = await this.prisma.enrollments.findUnique({
+      where: { id: enrollmentId },
+      select: {
+        id: true,
+        academic_year_id: true,
+        section: {
+          select: {
+            branch_id: true,
+            section_teachers: { select: { user_id: true } },
+          },
+        },
+      },
+    });
+    if (!enrollment || !canAccessBranch(viewer, enrollment.section.branch_id)) {
+      throw new NotFoundException('Enrolment not found');
+    }
+    if (!canAccessSection(viewer, enrollment.section)) {
+      throw new ForbiddenException('This enrolment is not in your classes');
+    }
+    return { id: enrollment.id, academic_year_id: enrollment.academic_year_id };
+  }
+
+  /**
+   * Records a human disagreeing with the engine (§4.3).
+   *
+   * The reason is mandatory because it is the whole point: an override with no
+   * stated reason is an unexplained rewrite of a student's year. Replacing an
+   * existing override overwrites it rather than stacking, so the row always
+   * reads as "the decision that stands, and why".
+   *
+   * This does not decide anything on its own — `confirm` still replays the
+   * preview and applies what it finds, so the override has to survive that
+   * replay to take effect.
+   */
+  async setDecisionOverride(
+    enrollmentId: string,
+    dto: OverridePromotionDto,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<{ decision: PromotionDecision; afterMakeup: boolean }> {
+    await this.writableEnrollment(enrollmentId, viewer);
+
+    const before = await this.prisma.promotion_overrides.findUnique({
+      where: {
+        enrollment_id_after_makeup: {
+          enrollment_id: enrollmentId,
+          after_makeup: dto.afterMakeup,
+        },
+      },
+    });
+
+    await this.prisma.promotion_overrides.upsert({
+      where: {
+        enrollment_id_after_makeup: {
+          enrollment_id: enrollmentId,
+          after_makeup: dto.afterMakeup,
+        },
+      },
+      create: {
+        enrollment_id: enrollmentId,
+        after_makeup: dto.afterMakeup,
+        decision: dto.decision,
+        reason: dto.reason,
+        overridden_by: actor.userId,
+      },
+      update: {
+        decision: dto.decision,
+        reason: dto.reason,
+        overridden_by: actor.userId,
+        overridden_at: new Date(),
+      },
+    });
+
+    await this.audit.record(actor, {
+      action: 'promotion.decision.override',
+      entityType: 'enrollment',
+      entityId: enrollmentId,
+      before: before
+        ? { decision: before.decision, reason: before.reason }
+        : undefined,
+      after: {
+        decision: dto.decision,
+        reason: dto.reason,
+        afterMakeup: dto.afterMakeup,
+      },
+    });
+
+    return { decision: dto.decision, afterMakeup: dto.afterMakeup };
+  }
+
+  /** Withdraws an override, letting the engine's verdict stand again. */
+  async clearDecisionOverride(
+    enrollmentId: string,
+    afterMakeup: boolean,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<{ cleared: boolean }> {
+    await this.writableEnrollment(enrollmentId, viewer);
+
+    const { count } = await this.prisma.promotion_overrides.deleteMany({
+      where: { enrollment_id: enrollmentId, after_makeup: afterMakeup },
+    });
+    if (count === 0) {
+      return { cleared: false };
+    }
+
+    await this.audit.record(actor, {
+      action: 'promotion.decision.override.clear',
+      entityType: 'enrollment',
+      entityId: enrollmentId,
+      after: { afterMakeup },
+    });
+    return { cleared: true };
   }
 
   /**
@@ -244,8 +432,11 @@ export class PromotionService {
     carriesWritten: number;
     notMovedForward: number;
   }> {
-    // Replays the branch-scoped preview, so an enrolment outside the viewer's
-    // branch is never in `selected` and cannot be confirmed (F1).
+    /* Replays the scoped preview, so an enrolment the viewer may not reach is
+       never in `previewed` — and the length check below then refuses the whole
+       run rather than quietly applying the subset they were allowed. That is
+       what re-verifies the ids a caller supplied, and it is why `confirm` needs
+       no scope check of its own. */
     const previewed = await this.preview(dto, viewer);
     const selected = previewed.filter((row) =>
       dto.enrollmentIds.includes(row.enrollmentId),
