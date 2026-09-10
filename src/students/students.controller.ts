@@ -31,6 +31,7 @@ import {
 } from './students.service';
 import {
   AttendanceSummaryView,
+  CarriedSubjectGroupView,
   EnrollmentHistoryView,
   ExamResultView,
   StudentRecordsService,
@@ -113,7 +114,7 @@ export class StudentsController {
     return this.students.listPlacements(id, viewer);
   }
 
-  // The three profile record panels. Reads only — both roles may view a student
+  // The four profile record panels. Reads only — both roles may view a student
   // they can reach; the record services gate on the same branch visibility as
   // the profile itself.
   @Get(':id/enrollments')
@@ -138,6 +139,14 @@ export class StudentsController {
     @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<ExamResultView[]> {
     return this.records.examResults(id, viewer);
+  }
+
+  @Get(':id/carried-subjects')
+  carriedSubjects(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<CarriedSubjectGroupView[]> {
+    return this.records.carriedSubjects(id, viewer);
   }
 
   @Post(':id/placements')

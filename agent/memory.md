@@ -451,3 +451,37 @@ will bite a future session if forgotten (full log in progress.md):
   new method there, take `viewer: AuthenticatedUser` and scope by branch via
   `branchScope` / `canAccessBranch` / `resolveWritableBranch` — the review found
   the whole failure class was "a service that skipped the scope layer".
+
+## A UNIQUE is a CONSTRAINT here, not an INDEX — `DROP INDEX` fails (2026-09-10)
+
+`prisma migrate deploy` failed applying `20260910000000_sections_one_per_level_gender`:
+
+```
+ERROR: cannot drop index sections_branch_id_academic_year_id_level_id_gender_name_key
+because constraint ... requires it            (SQLSTATE 2BP01)
+HINT: You can drop constraint ... instead.
+```
+
+**Why.** `prisma/migrations/0_init/migration.sql` declares these keys as
+`CREATE UNIQUE INDEX`, and a `migrate diff` will happily generate a matching
+`DROP INDEX`. But the live database was built from **`schema-v1.1.sql`**, which
+declares them inline on the table — so in Postgres they are constraints
+(`pg_constraint.contype = 'u'`) with a dependent index that cannot be dropped on
+its own.
+
+**Rule.** When a migration touches a UNIQUE on a table that came from
+`schema-v1.1.sql`, check the database before trusting the generated SQL:
+
+```sql
+SELECT conname, contype FROM pg_constraint WHERE conname LIKE 'sections_%';
+```
+
+`contype = 'u'` → use `ALTER TABLE ... DROP CONSTRAINT` / `ADD CONSTRAINT ... UNIQUE`,
+not `DROP INDEX` / `CREATE UNIQUE INDEX`. The migration history and the database
+disagree about how these were created; the database wins.
+
+**Recovering a half-applied migration.** The failure was on the first statement,
+so nothing was applied — `prisma migrate resolve --rolled-back <name>` clears the
+failed row, then fix the SQL and re-run `npm run db:migrate`. Check
+`_prisma_migrations.finished_at IS NULL` to confirm it never completed before
+resolving as rolled back.

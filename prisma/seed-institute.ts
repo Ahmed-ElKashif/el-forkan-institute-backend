@@ -23,23 +23,29 @@ import { PrismaPg } from '@prisma/adapter-pg';
  * This seed covers the roster prerequisite only.
  */
 
-// The institute's ladder: preparatory, five numbered years, then the terminal
-// completion level (the only one that grants a certificate). sort_order is what
-// every "study year" picker orders by. Flags left at their promotion-neutral
-// defaults except the terminal level — tune per the institute's rules later.
+// The institute's ladder, exactly as spec R1 names it: preparatory, four
+// numbered years, then the terminal completion level (the only one that grants
+// a certificate). sort_order is what every "study year" picker orders by. Flags
+// left at their promotion-neutral defaults except the terminal level.
+//
+// There is deliberately no L5. An earlier revision of this seeder invented one;
+// it appears nowhere in the spec and nowhere in the database, and seeding it
+// would have created two classes for a level the institute does not teach.
 const LEVELS = [
   { code: 'PREP', nameAr: 'المستوى التمهيدي', sortOrder: 1, isTerminal: false, grantsCertificate: false },
   { code: 'L1', nameAr: 'المستوى الأول', sortOrder: 2, isTerminal: false, grantsCertificate: false },
   { code: 'L2', nameAr: 'المستوى الثاني', sortOrder: 3, isTerminal: false, grantsCertificate: false },
   { code: 'L3', nameAr: 'المستوى الثالث', sortOrder: 4, isTerminal: false, grantsCertificate: false },
   { code: 'L4', nameAr: 'المستوى الرابع', sortOrder: 5, isTerminal: false, grantsCertificate: false },
-  { code: 'L5', nameAr: 'المستوى الخامس', sortOrder: 6, isTerminal: false, grantsCertificate: false },
-  { code: 'COMP', nameAr: 'المستوى الختامي', sortOrder: 7, isTerminal: true, grantsCertificate: true },
+  { code: 'COMP', nameAr: 'المستوى الختامي', sortOrder: 6, isTerminal: true, grantsCertificate: true },
 ] as const;
 
+// إخوة / أخوات — the wording the institute's own roster sheets use, and the
+// sheet names the Excel import and export read and write (R3). One vocabulary
+// everywhere beats three that mean the same thing.
 const GENDERS = [
-  { gender: 'male', suffix: 'بنون' },
-  { gender: 'female', suffix: 'بنات' },
+  { gender: 'male', suffix: 'إخوة' },
+  { gender: 'female', suffix: 'أخوات' },
 ] as const;
 
 function dateOnly(base: Date, addDays: number): Date {

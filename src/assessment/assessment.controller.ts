@@ -1,12 +1,14 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -22,6 +24,7 @@ import {
   IssueCertificateDto,
   ListExamsQueryDto,
   OverrideEligibilityDto,
+  OverridePromotionDto,
   RevokeCertificateDto,
   RunPromotionDto,
   SaveScoresDto,
@@ -192,8 +195,13 @@ export class AssessmentController {
     );
   }
 
+  /* The promotion run is open to both roles, scoped rather than restricted: a
+     teacher previews, edits and confirms their own classes, a head teacher the
+     whole branch. There is no `@Roles` here because the boundary is data, not
+     rank — `sectionScope` in `preview` decides what anyone can see, and
+     `confirm` replays that same preview, so an enrolment a caller cannot reach
+     is never in the run they are confirming. */
   @Post('promotion/preview')
-  @Roles('head_teacher')
   previewPromotion(
     @Body() dto: RunPromotionDto,
     @CurrentUser() viewer: AuthenticatedUser,
@@ -202,13 +210,39 @@ export class AssessmentController {
   }
 
   @Post('promotion/confirm')
-  @Roles('head_teacher')
   confirmPromotion(
     @Body() dto: ConfirmPromotionDto,
     @CurrentActor() actor: Actor,
     @CurrentUser() viewer: AuthenticatedUser,
   ) {
     return this.promotion.confirm(dto, actor, viewer);
+  }
+
+  /* Recording a disagreement with the engine (§4.3). PUT, so replaying it is a
+     no-op rather than stacking overrides on one enrolment. */
+  @Put('promotion/overrides/:enrollmentId')
+  overridePromotionDecision(
+    @Param('enrollmentId', ParseUUIDPipe) enrollmentId: string,
+    @Body() dto: OverridePromotionDto,
+    @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ) {
+    return this.promotion.setDecisionOverride(enrollmentId, dto, actor, viewer);
+  }
+
+  @Delete('promotion/overrides/:enrollmentId')
+  clearPromotionDecision(
+    @Param('enrollmentId', ParseUUIDPipe) enrollmentId: string,
+    @Query('afterMakeup') afterMakeup: string | undefined,
+    @CurrentActor() actor: Actor,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ) {
+    return this.promotion.clearDecisionOverride(
+      enrollmentId,
+      afterMakeup === 'true',
+      actor,
+      viewer,
+    );
   }
 
   // R20: a gate on enrolment, not an automatic promotion.

@@ -12,7 +12,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import { CurrentActor } from '../common/actor.decorator';
 import type { Actor } from '../common/actor.decorator';
-import { ExportService } from './export.service';
+import { ExportService, type ExportPreview } from './export.service';
 
 const XLSX_MIME =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -20,6 +20,37 @@ const XLSX_MIME =
 @Controller('exports')
 export class ExportController {
   constructor(private readonly exports: ExportService) {}
+
+  /* The preview routes mirror §6.3's preview-then-commit, and are the ordinary
+     way in: read the rows, then download. Plain JSON — no `@Header`, no
+     `StreamableFile` — because nothing is leaving the building yet, which is
+     also why they write no audit row. Scoped exactly like the downloads: both
+     go through `loadScope`, so a teacher previews only their own sections. */
+  @Get('roster/preview')
+  previewRoster(
+    @Query('academicYearId', ParseIntPipe) academicYearId: number,
+    @Query('levelId') levelId: string | undefined,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<ExportPreview> {
+    return this.exports.previewRoster(
+      academicYearId,
+      toOptionalId(levelId),
+      viewer,
+    );
+  }
+
+  @Get('results/preview')
+  previewResults(
+    @Query('academicYearId', ParseIntPipe) academicYearId: number,
+    @Query('levelId') levelId: string | undefined,
+    @CurrentUser() viewer: AuthenticatedUser,
+  ): Promise<ExportPreview> {
+    return this.exports.previewResults(
+      academicYearId,
+      toOptionalId(levelId),
+      viewer,
+    );
+  }
 
   @Get('roster')
   @Header('Content-Type', XLSX_MIME)

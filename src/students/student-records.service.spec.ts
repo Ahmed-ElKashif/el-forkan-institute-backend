@@ -12,10 +12,14 @@ const VIEWER: AuthenticatedUser = { id: 'v', role: 'head_teacher', branchId: nul
    toNumber(), or a dropped null would slip through. */
 function buildService() {
   const prisma = {
-    enrollments: { findMany: jest.fn() },
+    // findFirst backs absencePosition, which attendanceSummary always calls.
+    // Left unstubbed it resolves undefined, so the position reads null — the
+    // "no current enrolment" branch, which is what these tests want.
+    enrollments: { findMany: jest.fn(), findFirst: jest.fn() },
     academic_years: { findMany: jest.fn() },
     attendance: { count: jest.fn(), findMany: jest.fn() },
     exam_results: { findMany: jest.fn() },
+    carried_subjects: { findMany: jest.fn() },
     $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
   };
   const students = { assertVisible: jest.fn().mockResolvedValue(undefined) };
@@ -107,6 +111,47 @@ describe('StudentRecordsService', () => {
 
     expect(out[0]).toMatchObject({ academicYearId: 5, hijriYear: 1447, levelId: 2, levelName: 'المستوى الأول', sectionName: 'قسم أ' });
     expect(out[1]).toMatchObject({ hijriYear: 1446, levelId: null, levelName: null });
+  });
+
+  it('groups carried subjects by the level that produced them, dated by the year of the failure', async () => {
+    const { service, prisma } = buildService();
+    prisma.enrollments.findMany.mockResolvedValue([{ id: 'enr-l3' }]);
+    // The case the head teacher describes: a student sitting المستوى الثالث who
+    // still owes one subject from the first level and two from the second.
+    const fromYear = (id: number) => ({
+      enrollments_carried_subjects_from_enrollment_idToenrollments: {
+        academic_year_id: id,
+      },
+    });
+    prisma.carried_subjects.findMany.mockResolvedValue([
+      { subject_id: 7, status: 'pending', cleared_at: null, origin_level_id: 2, subjects: { name_ar: 'النحو' }, levels: { name_ar: 'المستوى الأول' }, ...fromYear(4) },
+      { subject_id: 9, status: 'pending', cleared_at: null, origin_level_id: 3, subjects: { name_ar: 'الفقه' }, levels: { name_ar: 'المستوى الثاني' }, ...fromYear(5) },
+      { subject_id: 11, status: 'cleared', cleared_at: new Date('2026-05-01T00:00:00Z'), origin_level_id: 3, subjects: { name_ar: 'التفسير' }, levels: { name_ar: 'المستوى الثاني' }, ...fromYear(5) },
+    ]);
+    prisma.academic_years.findMany.mockResolvedValue([
+      { id: 4, hijri_year: 1446 },
+      { id: 5, hijri_year: 1447 },
+    ]);
+
+    const out = await service.carriedSubjects('s1', VIEWER);
+
+    expect(out).toEqual([
+      {
+        originLevelId: 2,
+        originLevelName: 'المستوى الأول',
+        originHijriYear: 1446,
+        subjects: [{ subjectId: 7, subjectName: 'النحو', status: 'pending', clearedAt: null }],
+      },
+      {
+        originLevelId: 3,
+        originLevelName: 'المستوى الثاني',
+        originHijriYear: 1447,
+        subjects: [
+          { subjectId: 9, subjectName: 'الفقه', status: 'pending', clearedAt: null },
+          { subjectId: 11, subjectName: 'التفسير', status: 'cleared', clearedAt: '2026-05-01T00:00:00.000Z' },
+        ],
+      },
+    ]);
   });
 
   it('refuses a student outside the viewer’s scope before any record query', async () => {

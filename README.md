@@ -16,7 +16,7 @@ exams, promotion, certificates and WhatsApp reminders.
 ![Prisma](https://img.shields.io/badge/Prisma-7-0A665C?style=for-the-badge&logo=prisma&logoColor=white)
 ![Postgres](https://img.shields.io/badge/Supabase-Postgres-084F47?style=for-the-badge&logo=supabase&logoColor=white)
 
-![Routes](https://img.shields.io/badge/routes-117-C5852D?style=for-the-badge)
+![Routes](https://img.shields.io/badge/routes-131-C5852D?style=for-the-badge)
 ![Tests](https://img.shields.io/badge/tests-396_passing-C5852D?style=for-the-badge)
 ![Zod](https://img.shields.io/badge/validation-Zod-A76D24?style=for-the-badge)
 
@@ -158,7 +158,7 @@ threaded through the data layer, not the controller).
 Plus `GET /health`. Routes with no `@Roles()` are open to any authenticated user
 **but branch-scoped in the service layer** (a teacher only ever sees their own
 branch's data); `@Roles('head_teacher')` guards anything that destroys data,
-rewrites history, or changes the rules — **55 of the 117**.
+rewrites history, or changes the rules — **53 of the 131**.
 
 ### Two roles, and only two
 
@@ -270,7 +270,7 @@ Living documents, kept current as the build moves:
 
 <div align="center">
 
-**Status:** backend Phases 0–6 complete · 117 routes live · external security
+**Status:** backend Phases 0–6 complete · 131 routes live · external security
 review remediated.<br/>
 Frontend is at F0c — sign-in, session and the role-scoped app frame working.
 [See the frontend repo →](https://github.com/Ahmed-ElKashif/el-forkan-institute-frontend)

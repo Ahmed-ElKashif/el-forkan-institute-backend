@@ -27,6 +27,35 @@ import type {
   UpdateSectionDto,
 } from './dto/section.schema';
 
+/* إخوة / أخوات — the wording the institute's roster sheets use and the sheet
+   names the Excel import and export read (R3). Kept identical to the seeder's
+   so a provisioned year and a seeded one name their classes the same way. */
+const GENDER_SUFFIXES = [
+  { gender: 'male', suffix: 'إخوة' },
+  { gender: 'female', suffix: 'أخوات' },
+] as const;
+
+/**
+ * Rethrows a unique violation on the class key as a 409 the head teacher can
+ * act on, rather than a raw constraint name. A level has many subjects but a
+ * single cohort (R1 × R3), so a second class for the same level and gender is
+ * a mistake, not a capacity decision.
+ *
+ * Returns `never`, so `.catch(refuseSecondClass)` leaves the promise's resolved
+ * type intact instead of widening it.
+ */
+function refuseSecondClass(error: unknown): never {
+  if (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2002'
+  ) {
+    throw new ConflictException(
+      'This level already has a class for that gender in this year and branch; a level has one class, not several',
+    );
+  }
+  throw error;
+}
+
 export interface SectionTeacherView {
   userId: string;
   fullName: string;
@@ -125,21 +154,103 @@ export class SectionsService {
     return toSection(await this.findAccessible(id, viewer));
   }
 
-  async create(dto: CreateSectionDto, actor: Actor): Promise<SectionView> {
-    const created = await this.prisma.sections.create({
-      data: {
-        branch_id: dto.branchId,
-        academic_year_id: dto.academicYearId,
-        level_id: dto.levelId,
-        gender: dto.gender,
-        name: dto.name,
-        default_mode: dto.defaultMode,
-        supervisor_id: dto.supervisorId,
-        whatsapp_group_id: dto.whatsappGroupId,
-        capacity: dto.capacity,
-      },
-      ...SECTION_SHAPE,
+  /**
+   * Creates the year's classes: one per level per gender, and no more.
+   *
+   * The institute runs university-style — a level has many subjects but a
+   * single cohort (R1 × R3), so the class list is not something anyone should
+   * be typing in by hand. Subjects reach students through `curriculum`
+   * (year, level, term), never through the class, which is why one class per
+   * level is enough to teach every subject that level offers.
+   *
+   * Idempotent by identity, not by name: re-running fills the gaps and leaves
+   * an existing class's name, capacity and supervisor exactly as they are. That
+   * matters because the head teacher may have renamed a class, and provisioning
+   * a new year must never quietly undo that.
+   */
+  async provisionYear(
+    academicYearId: number,
+    branchId: number,
+    actor: Actor,
+  ): Promise<{ created: number; total: number }> {
+    const levels = await this.prisma.levels.findMany({
+      orderBy: { sort_order: 'asc' },
+      select: { id: true, name_ar: true },
     });
+
+    let created = 0;
+    for (const level of levels) {
+      for (const { gender, suffix } of GENDER_SUFFIXES) {
+        const exists = await this.prisma.sections.findFirst({
+          where: {
+            branch_id: branchId,
+            academic_year_id: academicYearId,
+            level_id: level.id,
+            gender,
+          },
+          select: { id: true },
+        });
+        if (exists) continue;
+        try {
+          await this.prisma.sections.create({
+            data: {
+              branch_id: branchId,
+              academic_year_id: academicYearId,
+              level_id: level.id,
+              gender,
+              name: `${level.name_ar} — ${suffix}`,
+            },
+          });
+          created += 1;
+        } catch (cause) {
+          // P2002 means another provision run won the race and made this exact
+          // class. That is the outcome we wanted, so it is not an error.
+          if (
+            !(cause instanceof Prisma.PrismaClientKnownRequestError) ||
+            cause.code !== 'P2002'
+          ) {
+            throw cause;
+          }
+        }
+      }
+    }
+
+    await this.audit.record(actor, {
+      action: 'section.provision',
+      entityType: 'academic_year',
+      entityId: String(academicYearId),
+      after: {
+        branchId,
+        created,
+        total: levels.length * GENDER_SUFFIXES.length,
+      },
+    });
+    return { created, total: levels.length * GENDER_SUFFIXES.length };
+  }
+
+  /**
+   * Creates one class directly. Kept for the import's recovery path, which has
+   * to be able to name a class it could not find — but a level+gender already
+   * holds exactly one class (see {@link provisionYear}), so the ordinary answer
+   * to "I need a class" is to provision the year, not to call this.
+   */
+  async create(dto: CreateSectionDto, actor: Actor): Promise<SectionView> {
+    const created = await this.prisma.sections
+      .create({
+        data: {
+          branch_id: dto.branchId,
+          academic_year_id: dto.academicYearId,
+          level_id: dto.levelId,
+          gender: dto.gender,
+          name: dto.name,
+          default_mode: dto.defaultMode,
+          supervisor_id: dto.supervisorId,
+          whatsapp_group_id: dto.whatsappGroupId,
+          capacity: dto.capacity,
+        },
+        ...SECTION_SHAPE,
+      })
+      .catch(refuseSecondClass);
     await this.audit.record(actor, {
       action: 'section.create',
       entityType: 'section',

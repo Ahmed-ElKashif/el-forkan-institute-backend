@@ -79,6 +79,89 @@ export class ResultsService {
     return exam;
   }
 
+  /**
+   * Every enrolment held by the students behind `enrollmentIds`.
+   *
+   * A carry is attached to the enrolment that *inherited* the debt, not the one
+   * that incurred it, so a student sitting L3 carries an L1 failure on their L3
+   * row. Reaching that row from the enrolment being marked means going through
+   * the student — §4.6: "the engine must scan `carried_subjects` across all
+   * prior enrollments, not just last year's".
+   */
+  private async enrollmentsOfSameStudents(
+    tx: Prisma.TransactionClient,
+    enrollmentIds: string[],
+  ): Promise<string[]> {
+    const marked = await tx.enrollments.findMany({
+      where: { id: { in: enrollmentIds } },
+      select: { student_id: true },
+    });
+    const siblings = await tx.enrollments.findMany({
+      where: { student_id: { in: marked.map((row) => row.student_id) } },
+      select: { id: true },
+    });
+    return siblings.map((row) => row.id);
+  }
+
+  /**
+   * Settles carried debt: passing a subject clears every pending carry for it.
+   *
+   * Until this existed a carry stayed `pending` forever, and R20's COMP gate —
+   * which refuses entry while any carry is pending — locked the student out of
+   * the terminal level permanently, however many times they re-sat the paper.
+   *
+   * A carry is never written as `failed`. Nothing in the spec says when debt
+   * becomes permanent, and inventing a rule here would silently change who may
+   * enter COMP.
+   */
+  private async clearCarriesFor(
+    tx: Prisma.TransactionClient,
+    subjectId: number,
+    enrollmentIds: string[],
+  ): Promise<number> {
+    if (enrollmentIds.length === 0) {
+      return 0;
+    }
+    const { count } = await tx.carried_subjects.updateMany({
+      where: {
+        status: 'pending',
+        subject_id: subjectId,
+        enrollment_id: {
+          in: await this.enrollmentsOfSameStudents(tx, enrollmentIds),
+        },
+      },
+      data: { status: 'cleared', cleared_at: new Date() },
+    });
+    return count;
+  }
+
+  /**
+   * The mirror of {@link clearCarriesFor}, for an R8 correction that turns a
+   * pass back into a fail. Without it the debt would stay settled on the
+   * strength of a mark that no longer exists, and the student would walk
+   * through the COMP gate on a subject they have not passed.
+   */
+  private async reopenCarriesFor(
+    tx: Prisma.TransactionClient,
+    subjectId: number,
+    enrollmentIds: string[],
+  ): Promise<number> {
+    if (enrollmentIds.length === 0) {
+      return 0;
+    }
+    const { count } = await tx.carried_subjects.updateMany({
+      where: {
+        status: 'cleared',
+        subject_id: subjectId,
+        enrollment_id: {
+          in: await this.enrollmentsOfSameStudents(tx, enrollmentIds),
+        },
+      },
+      data: { status: 'pending', cleared_at: null },
+    });
+    return count;
+  }
+
   async getScoreGrid(
     examId: string,
     viewer: AuthenticatedUser,
@@ -180,8 +263,12 @@ export class ResultsService {
       }
     }
 
-    await this.prisma.$transaction(
-      dto.entries.map((entry) => {
+    // Interactive rather than an array of promises: the carries can only be
+    // settled once every mark on the paper is written, and both halves must
+    // land together — a pass that cleared no debt is the bug this fixes.
+    const carriesCleared = await this.prisma.$transaction(async (tx) => {
+      const passed: string[] = [];
+      for (const entry of dto.entries) {
         const result = resolveOutcome(
           { score: entry.score, isAbsent: entry.isAbsent },
           marking,
@@ -191,7 +278,10 @@ export class ResultsService {
         // so the distinction is made here.
         const stored =
           !entry.isAbsent && entry.score === null ? 'pending' : result;
-        return this.prisma.exam_results.upsert({
+        if (stored === 'pass') {
+          passed.push(entry.enrollmentId);
+        }
+        await tx.exam_results.upsert({
           where: {
             exam_id_enrollment_id: {
               exam_id: examId,
@@ -214,14 +304,15 @@ export class ResultsService {
             updated_at: new Date(),
           },
         });
-      }),
-    );
+      }
+      return this.clearCarriesFor(tx, exam.curriculum.subject_id, passed);
+    });
 
     await this.audit.record(actor, {
       action: 'exam.scores.save',
       entityType: 'exam',
       entityId: examId,
-      after: { entries: dto.entries.length },
+      after: { entries: dto.entries.length, carriesCleared },
     });
     return { saved: dto.entries.length };
   }
@@ -294,30 +385,52 @@ export class ResultsService {
       marking,
     );
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const row = await tx.exam_results.update({
-        where: { id: resultId },
-        data: {
-          score: dto.score,
-          is_absent: dto.isAbsent,
-          result: newResult,
-          updated_by: actor.userId,
-          updated_at: new Date(),
-        },
-      });
-      await tx.grade_changes.create({
-        data: {
-          exam_result_id: resultId,
-          old_score: before.score,
-          new_score: dto.score,
-          old_result: before.result,
-          new_result: newResult,
-          reason: dto.reason,
-          changed_by: actor.userId,
-        },
-      });
-      return row;
-    });
+    const { row: updated, carries } = await this.prisma.$transaction(
+      async (tx) => {
+        const row = await tx.exam_results.update({
+          where: { id: resultId },
+          data: {
+            score: dto.score,
+            is_absent: dto.isAbsent,
+            result: newResult,
+            updated_by: actor.userId,
+            updated_at: new Date(),
+          },
+        });
+        await tx.grade_changes.create({
+          data: {
+            exam_result_id: resultId,
+            old_score: before.score,
+            new_score: dto.score,
+            old_result: before.result,
+            new_result: newResult,
+            reason: dto.reason,
+            changed_by: actor.userId,
+          },
+        });
+        // A correction moves the verdict in either direction, and the carry has
+        // to follow it. Clearing on a pass but never reopening on a reversal
+        // would leave debt settled on the strength of a mark that no longer
+        // exists — the student would pass the COMP gate on a subject they have
+        // not passed.
+        const subjectId = before.exams.curriculum.subject_id;
+        return {
+          row,
+          carries:
+            newResult === 'pass'
+              ? {
+                  cleared: await this.clearCarriesFor(tx, subjectId, [
+                    before.enrollment_id,
+                  ]),
+                }
+              : {
+                  reopened: await this.reopenCarriesFor(tx, subjectId, [
+                    before.enrollment_id,
+                  ]),
+                },
+        };
+      },
+    );
 
     await this.audit.record(actor, {
       action: 'exam.score.correct',
@@ -327,7 +440,12 @@ export class ResultsService {
         score: before.score?.toNumber() ?? null,
         result: before.result,
       },
-      after: { score: dto.score, result: newResult, reason: dto.reason },
+      after: {
+        score: dto.score,
+        result: newResult,
+        reason: dto.reason,
+        ...carries,
+      },
     });
 
     return {

@@ -33,6 +33,17 @@ export const CreateSectionSchema = z
   })
   .strict();
 
+// Provisioning a year's classes. No level list and no names: the whole point is
+// that the class set is derived from the levels the institute teaches, not
+// chosen per run. `branchId` is a request, not a decision — a branch-bound head
+// teacher gets their own branch regardless (resolveWritableBranch).
+export const ProvisionSectionsSchema = z
+  .object({
+    academicYearId: z.number().int().positive(),
+    branchId: z.number().int().positive().nullable().default(null),
+  })
+  .strict();
+
 // branchId, academicYearId, levelId and gender are all absent: together they
 // are the section's identity, and three of them are composite-FK targets that
 // enrolments already point at.
@@ -92,6 +103,9 @@ export const TransferEnrollmentSchema = z
   .strict();
 
 export class CreateSectionDto extends createZodDto(CreateSectionSchema) {}
+export class ProvisionSectionsDto extends createZodDto(
+  ProvisionSectionsSchema,
+) {}
 export class UpdateSectionDto extends createZodDto(UpdateSectionSchema) {}
 export class ListSectionsQueryDto extends createZodDto(
   ListSectionsQuerySchema,
