@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -13,6 +14,7 @@ import { buildPage, Page, toPrismaPage } from '../common/pagination';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.interface';
 import type {
+  CreateClassDayDto,
   ListSessionsQueryDto,
   UpdateSessionDto,
 } from './dto/teaching.schema';
@@ -24,6 +26,7 @@ export interface SessionView {
   subjectId: number;
   subjectNameAr: string;
   teacherId: string | null;
+  sheikhName: string | null;
   sessionNo: number | null;
   sessionDate: string;
   startsAt: string;
@@ -84,6 +87,100 @@ export class SessionsService {
   }
 
   /**
+   * Creates a class day: one date's periods, entered by hand for a level rather
+   * than generated from a recurring timetable (the institute schedules each
+   * Friday as it comes). The level's cohorts are resolved through the viewer's
+   * own scope, so a branch-bound head teacher can only schedule their branch.
+   *
+   * A `both` period is written once per cohort of the level, so boys and girls
+   * keep separate attendance even when one sheikh teaches them together.
+   */
+  async createClassDay(
+    levelId: number,
+    dto: CreateClassDayDto,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<{ created: number; skipped: number }> {
+    const sections = await this.prisma.sections.findMany({
+      where: {
+        ...sectionScope(viewer),
+        level_id: levelId,
+        academic_year_id: dto.academicYearId,
+      },
+      select: { id: true, gender: true },
+    });
+    if (sections.length === 0) {
+      throw new ConflictException(
+        'No classes exist for this level in that year — provision them first',
+      );
+    }
+
+    const rows = dto.periods.flatMap((period) =>
+      sections
+        .filter(
+          (section) =>
+            period.genderScope === 'both' ||
+            section.gender === period.genderScope,
+        )
+        .map((section) => ({
+          section_id: section.id,
+          subject_id: period.subjectId,
+          sheikh_name: period.sheikhName,
+          // The period's order in the day (first class, second class …) — the
+          // ordinal the attendance view labels "first/last class" by.
+          session_no: period.slotOrder,
+          session_date: dto.sessionDate,
+          starts_at: toTimeValue(period.startsAt),
+          ends_at: toTimeValue(period.endsAt),
+          created_by: actor.userId,
+        })),
+    );
+
+    const result = await this.prisma.sessions.createMany({
+      data: rows,
+      // UNIQUE (section_id, session_date, starts_at) makes a re-post idempotent
+      // and never disturbs attendance already taken against an existing period.
+      skipDuplicates: true,
+    });
+
+    await this.audit.record(actor, {
+      action: 'session.classDay.create',
+      entityType: 'level',
+      entityId: String(levelId),
+      after: {
+        sessionDate: toDateOnlyString(dto.sessionDate),
+        periods: dto.periods.length,
+        created: result.count,
+      },
+    });
+    return { created: result.count, skipped: rows.length - result.count };
+  }
+
+  /**
+   * Removes one period. `attendance` cascades with the session (FK ON DELETE
+   * CASCADE), so deleting a period the head teacher created by mistake takes its
+   * marks with it — which is why this is head-teacher only at the controller.
+   */
+  async remove(
+    sessionId: string,
+    actor: Actor,
+    viewer: AuthenticatedUser,
+  ): Promise<void> {
+    const before = await this.prisma.sessions.findUniqueOrThrow({
+      where: { id: sessionId },
+      ...SESSION_SHAPE,
+    });
+    await this.assertSectionAccess(before.section_id, viewer);
+    await this.prisma.sessions.delete({ where: { id: sessionId } });
+    await this.audit.record(actor, {
+      action: 'session.delete',
+      entityType: 'session',
+      entityId: sessionId,
+      before: toSessionView(before),
+    });
+  }
+
+  /**
    * R4: "Sessions may be onsite, online, or hybrid" and Friday is only the
    * default day, so any single session can be moved or switched without
    * touching the timetable it came from. `is_exception` marks the ones that
@@ -128,6 +225,8 @@ export class SessionsService {
     const updated = await this.prisma.sessions.update({
       where: { id },
       data: {
+        subject_id: dto.subjectId,
+        sheikh_name: dto.sheikhName,
         session_date: dto.sessionDate,
         starts_at: dto.startsAt ? toTimeValue(dto.startsAt) : undefined,
         ends_at: dto.endsAt ? toTimeValue(dto.endsAt) : undefined,
@@ -189,6 +288,7 @@ function toSessionView(row: SessionRecord): SessionView {
     subjectId: row.subject_id,
     subjectNameAr: row.subjects.name_ar,
     teacherId: row.teacher_id,
+    sheikhName: row.sheikh_name,
     sessionNo: row.session_no,
     sessionDate: toDateOnlyString(row.session_date),
     startsAt: fromTimeValue(row.starts_at),

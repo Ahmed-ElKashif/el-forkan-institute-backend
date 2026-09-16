@@ -10,21 +10,20 @@ import { PhoneSchema } from '../../common/phone';
 const ROLES = ['head_teacher', 'teacher'] as const;
 const GENDERS = ['male', 'female'] as const;
 
+// A display handle, unique per user. Restricted to ASCII so it can never be two
+// visually identical usernames that differ by an Arabic form or a zero-width
+// character. NOT the login credential — staff sign in with their email.
+const UsernameSchema = z
+  .string()
+  .trim()
+  .min(3)
+  .max(50)
+  .regex(/^[a-zA-Z0-9._-]+$/, 'Use letters, digits, dot, underscore or dash');
+
 export const CreateUserSchema = z
   .object({
     fullName: z.string().trim().min(2).max(120),
-    // Login identifier (spec §5.1). Restricted to ASCII so it can never be
-    // two visually identical usernames that differ by an Arabic form or a
-    // zero-width character.
-    username: z
-      .string()
-      .trim()
-      .min(3)
-      .max(50)
-      .regex(
-        /^[a-zA-Z0-9._-]+$/,
-        'Use letters, digits, dot, underscore or dash',
-      ),
+    username: UsernameSchema,
     gender: z.enum(GENDERS),
     phone: PhoneSchema,
     // Required since F12: email is the login identity (staff sign in with it and
@@ -38,14 +37,16 @@ export const CreateUserSchema = z
   })
   .strict();
 
-// gender and username are deliberately absent. gender is the target of the
-// composite foreign keys that make cross-gender rosters structurally
-// impossible (spec §5.1), so changing it on a user who already teaches a
-// section would have to cascade; username is the login identifier, and
-// silently moving it is an account-takeover shape. Both are recreate-only.
+// gender is editable, but it is the target of the composite FK that keeps a
+// teacher's gender matched to the classes they teach (spec §5.1) — so the
+// service refuses to change it while the user is assigned to a class (409),
+// where changing it would strand the assignment. username is editable too: login
+// is by email, so a username is just a display handle; a collision returns 409.
 export const UpdateUserSchema = z
   .object({
     fullName: z.string().trim().min(2).max(120),
+    username: UsernameSchema,
+    gender: z.enum(GENDERS),
     phone: PhoneSchema,
     email: z.string().trim().toLowerCase().email().max(180).nullable(),
     role: z.enum(ROLES),

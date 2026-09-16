@@ -12,21 +12,20 @@ const TimeOfDaySchema = z
   .string()
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Expected HH:MM in 24-hour time');
 
-// R4: Friday is the default, not a hard rule — the weekday is per slot.
-const IsoWeekdaySchema = z.number().int().min(1).max(7);
+// A period's gender scope. `both` — the sheikh teaches boys and girls at the
+// same time (girls in a separate room on speakers); it materialises as one
+// session per gendered cohort so each keeps its own attendance. `male`/`female`
+// — the period runs for that cohort only.
+const PERIOD_GENDER_SCOPES = ['both', 'male', 'female'] as const;
 
-export const CreateTimetableSlotSchema = z
+const ClassDayPeriodSchema = z
   .object({
     subjectId: z.number().int().positive(),
-    teacherId: z.uuid().nullable().default(null),
-    weekday: IsoWeekdaySchema.default(5),
     slotOrder: z.number().int().min(1).max(20),
     startsAt: TimeOfDaySchema,
     endsAt: TimeOfDaySchema,
-    room: z.string().trim().max(60).nullable().default(null),
-    mode: z.enum(DELIVERY_MODES).default('onsite'),
-    effectiveFrom: DateOnlySchema.nullable().default(null),
-    effectiveTo: DateOnlySchema.nullable().default(null),
+    sheikhName: z.string().trim().max(120).nullable().default(null),
+    genderScope: z.enum(PERIOD_GENDER_SCOPES).default('both'),
   })
   .strict()
   .refine((value) => value.endsAt > value.startsAt, {
@@ -34,32 +33,34 @@ export const CreateTimetableSlotSchema = z
     path: ['endsAt'],
   });
 
-export const UpdateTimetableSlotSchema = z
+// A class day: one calendar date and the periods held on it, created by hand
+// for a level (both cohorts). Unlike GenerateSessions this is not derived from
+// a recurring timetable — the institute schedules each Friday as it comes.
+export const CreateClassDaySchema = z
   .object({
-    teacherId: z.uuid().nullable(),
-    weekday: IsoWeekdaySchema,
-    slotOrder: z.number().int().min(1).max(20),
-    startsAt: TimeOfDaySchema,
-    endsAt: TimeOfDaySchema,
-    room: z.string().trim().max(60).nullable(),
-    mode: z.enum(DELIVERY_MODES),
-    effectiveFrom: DateOnlySchema.nullable(),
-    effectiveTo: DateOnlySchema.nullable(),
+    academicYearId: z.number().int().positive(),
+    sessionDate: DateOnlySchema,
+    periods: z.array(ClassDayPeriodSchema).min(1).max(20),
   })
-  .strict()
-  .partial();
+  .strict();
 
-export const GenerateSessionsSchema = z
+// The attendance grid is read either for a whole term (the printed sheet's
+// 1…15 columns) or for a single class day (one Friday's periods). `termId`
+// anchors the running absence count in both cases; `date`, when given, narrows
+// the columns to that day.
+export const AttendanceGridQuerySchema = z
   .object({
-    termId: z.number().int().positive(),
-    // Institute holidays. A slot landing on one is skipped and the numbering
-    // continues, so a closure does not consume one of the fifteen columns.
-    offDays: z.array(DateOnlySchema).max(60).default([]),
+    termId: z.coerce.number().int().positive(),
+    date: DateOnlySchema.optional(),
   })
   .strict();
 
 export const UpdateSessionSchema = z
   .object({
+    // Editing a class-day period: its subject, times, and the sheikh who teaches
+    // it. The rest are the older reschedule/cancel fields.
+    subjectId: z.number().int().positive(),
+    sheikhName: z.string().trim().max(120).nullable(),
     sessionDate: DateOnlySchema,
     startsAt: TimeOfDaySchema,
     endsAt: TimeOfDaySchema,
@@ -127,13 +128,10 @@ export const SaveAttendanceSchema = z
   })
   .strict();
 
-export class CreateTimetableSlotDto extends createZodDto(
-  CreateTimetableSlotSchema,
+export class CreateClassDayDto extends createZodDto(CreateClassDaySchema) {}
+export class AttendanceGridQueryDto extends createZodDto(
+  AttendanceGridQuerySchema,
 ) {}
-export class UpdateTimetableSlotDto extends createZodDto(
-  UpdateTimetableSlotSchema,
-) {}
-export class GenerateSessionsDto extends createZodDto(GenerateSessionsSchema) {}
 export class UpdateSessionDto extends createZodDto(UpdateSessionSchema) {}
 export class ListSessionsQueryDto extends createZodDto(
   ListSessionsQuerySchema,

@@ -13,7 +13,7 @@ import type { CreateSectionDto } from './dto/section.schema';
    Mocked at the boundaries only: Prisma is the database, AuditService writes
    to it. */
 
-const ACTOR: Actor = { userId: 'h1', ip: null, userAgent: null };
+const ACTOR: Actor = { userId: 'h1' };
 
 /** The institute's ladder as spec R1 names it — six levels, no L5. */
 const LEVELS = [

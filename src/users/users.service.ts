@@ -90,19 +90,53 @@ export class UsersService {
           : { branches: { connect: { id: dto.branchId } } }),
       });
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        const fields = (error.meta?.target as string[] | undefined) ?? [];
-        const field = fields.includes('email')
-          ? 'email'
-          : fields.includes('username')
-            ? 'username'
-            : 'phone';
-        throw new ConflictException(`That ${field} is already in use`);
-      }
-      throw error;
+      this.translateUniqueConflict(error);
+    }
+  }
+
+  /** Turns a unique-constraint collision (email, username or phone — all three
+   *  are unique) into a 409 that names the field, instead of a raw 500. Never
+   *  returns: it rethrows anything that is not a uniqueness violation. */
+  private translateUniqueConflict(error: unknown): never {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      const fields = (error.meta?.target as string[] | undefined) ?? [];
+      const field = fields.includes('email')
+        ? 'email'
+        : fields.includes('username')
+          ? 'username'
+          : 'phone';
+      throw new ConflictException(`That ${field} is already in use`);
+    }
+    throw error;
+  }
+
+  /** Apply an edit, turning a unique collision (a taken username/email/phone)
+   *  into a 409 rather than a raw 500 — the same guarantee create gives. */
+  private async updateRecord(id: string, dto: UpdateUserDto): Promise<UserRecord> {
+    try {
+      return await this.usersRepository.update(id, {
+        ...(dto.fullName === undefined ? {} : { full_name: dto.fullName }),
+        ...(dto.username === undefined ? {} : { username: dto.username }),
+        ...(dto.gender === undefined ? {} : { gender: dto.gender }),
+        ...(dto.phone === undefined ? {} : { phone: dto.phone }),
+        ...(dto.email === undefined ? {} : { email: dto.email }),
+        ...(dto.role === undefined ? {} : { role: dto.role }),
+        ...(dto.isActive === undefined ? {} : { is_active: dto.isActive }),
+        ...(dto.branchId === undefined
+          ? {}
+          : {
+              branches:
+                dto.branchId === null
+                  ? { disconnect: true }
+                  : { connect: { id: dto.branchId } },
+            }),
+        updated_at: new Date(),
+      });
+    } catch (error) {
+      this.translateUniqueConflict(error);
     }
   }
 
@@ -113,22 +147,24 @@ export class UsersService {
     viewer: AuthenticatedUser,
   ): Promise<PublicUser> {
     const before = await this.findVisible(id, viewer);
-    const updated = await this.usersRepository.update(id, {
-      ...(dto.fullName === undefined ? {} : { full_name: dto.fullName }),
-      ...(dto.phone === undefined ? {} : { phone: dto.phone }),
-      ...(dto.email === undefined ? {} : { email: dto.email }),
-      ...(dto.role === undefined ? {} : { role: dto.role }),
-      ...(dto.isActive === undefined ? {} : { is_active: dto.isActive }),
-      ...(dto.branchId === undefined
-        ? {}
-        : {
-            branches:
-              dto.branchId === null
-                ? { disconnect: true }
-                : { connect: { id: dto.branchId } },
-          }),
-      updated_at: new Date(),
-    });
+
+    // Gender is the target of the section_teachers composite FK (a teacher's
+    // gender must match the classes they teach). Changing it while assigned
+    // would strand that assignment, so refuse with a clear 409 rather than let
+    // the FK fail as a 500. Safe for accounts that teach nothing (e.g. the head
+    // teacher fixing their own record).
+    if (dto.gender !== undefined && dto.gender !== before.gender) {
+      const assignments = await this.prisma.section_teachers.count({
+        where: { user_id: id },
+      });
+      if (assignments > 0) {
+        throw new ConflictException(
+          'Cannot change gender while assigned to a class',
+        );
+      }
+    }
+
+    const updated = await this.updateRecord(id, dto);
 
     await this.audit.record(actor, {
       action: 'user.update',

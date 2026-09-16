@@ -1,9 +1,9 @@
 import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtAuthGuard } from './jwt-auth.guard';
-import type { ITokenService } from '../interfaces/token.service.interface';
+import type { ITokenService, AccessTokenPayload } from '../interfaces/token.service.interface';
 
-const VALID_PAYLOAD = { sub: 'user-1', role: 'head_teacher', branchId: null };
+const VALID_PAYLOAD: AccessTokenPayload = { sub: 'user-1', role: 'head_teacher', branchId: null };
 
 function contextWithHeader(authorization?: string) {
   const request: { headers: Record<string, string>; user?: unknown } = {

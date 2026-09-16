@@ -19,7 +19,7 @@ const VIEWER: AuthenticatedUser = {
   role: 'head_teacher',
   branchId: null,
 };
-const ACTOR: Actor = { userId: 'v', ip: null, userAgent: null };
+const ACTOR: Actor = { userId: 'v' };
 
 const SUBJECT_ID = 42;
 const CURRICULUM = {
