@@ -1,0 +1,11 @@
+-- The free-text name of the sheikh who teaches a class period.
+--
+-- WHY TEXT AND NOT A users FK
+-- Class days are created by hand, one date at a time, and the person who
+-- actually teaches a period — a sheikh — is usually not a system user and is a
+-- different person from the teacher who records that class's attendance and
+-- scores. Modelling him as a users row would force an account (and a login) for
+-- someone who never signs in. `sessions.teacher_id` stays for the legacy
+-- generate-from-timetable path; the per-date flow writes this name instead.
+-- NULL means "no sheikh named yet".
+ALTER TABLE "sessions" ADD COLUMN "sheikh_name" TEXT;

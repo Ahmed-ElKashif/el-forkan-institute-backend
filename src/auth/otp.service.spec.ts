@@ -27,7 +27,7 @@ function buildService(stored: OtpChallenge | null, verifyReturns = true) {
   const create = jest.fn((args: { data: Record<string, unknown> }) =>
     Promise.resolve(challenge({ id: 'created', ...args.data })),
   );
-  const update = jest.fn(() => Promise.resolve(challenge()));
+  const update = jest.fn((_args: { data: Record<string, unknown> }) => Promise.resolve(challenge()));
   const updateMany = jest.fn(() => Promise.resolve({ count: 1 }));
   const prisma = {
     otp_challenges: { findUnique, create, update, updateMany },

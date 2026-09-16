@@ -130,6 +130,7 @@ describe('UsersService.create', () => {
       {
         fullName: 'فاطمة',
         username: 'fatima',
+        email: 'fatima@forkan.test',
         gender: 'female',
         phone: '+201009998888',
         password: 'plaintext-secret',

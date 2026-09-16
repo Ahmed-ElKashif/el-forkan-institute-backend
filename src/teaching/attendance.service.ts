@@ -47,7 +47,9 @@ export interface AttendanceGrid {
     id: string;
     sessionNo: number | null;
     sessionDate: string;
+    startsAt: string;
     subjectNameAr: string;
+    sheikhName: string | null;
     mode: string;
     status: string;
   }>;
@@ -73,22 +75,29 @@ export class AttendanceService {
    * The whole grid: one query for sessions, one for enrolments-with-attendance.
    * Attendance rows are keyed by session so a student with no record yet
    * renders as an empty cell rather than being missing from the row.
+   *
+   * `date` narrows the columns to a single class day (the per-Friday view) while
+   * the absence count still spans the whole term — so a day's marking shows the
+   * student's running term total, not just that day's. Without it the grid is
+   * the printed term sheet (columns 1…15).
    */
   async getGrid(
     sectionId: string,
-    termId: number,
+    query: { termId: number; date?: Date },
     viewer: AuthenticatedUser,
   ): Promise<AttendanceGrid> {
     await this.assertSectionAccess(sectionId, viewer);
     const term = await this.prisma.terms.findUniqueOrThrow({
-      where: { id: termId },
+      where: { id: query.termId },
     });
 
     const [sessions, enrollments] = await this.prisma.$transaction([
       this.prisma.sessions.findMany({
         where: {
           section_id: sectionId,
-          session_date: { gte: term.starts_on, lte: term.ends_on },
+          session_date: query.date
+            ? query.date
+            : { gte: term.starts_on, lte: term.ends_on },
         },
         include: { subjects: { select: { name_ar: true } } },
         orderBy: [{ session_date: 'asc' }, { starts_at: 'asc' }],
@@ -115,7 +124,9 @@ export class AttendanceService {
         id: session.id,
         sessionNo: session.session_no,
         sessionDate: toDateOnlyString(session.session_date),
+        startsAt: fromTimeValue(session.starts_at),
         subjectNameAr: session.subjects.name_ar,
+        sheikhName: session.sheikh_name,
         mode: session.mode,
         status: session.status,
       })),
@@ -375,4 +386,10 @@ export class AttendanceService {
       throw new ForbiddenException('This section is not assigned to you');
     }
   }
+}
+
+// Postgres TIME carries no date; the value rides on the Unix epoch in UTC. The
+// date-first attendance header shows the period's start time beside its subject.
+function fromTimeValue(value: Date): string {
+  return value.toISOString().slice(11, 16);
 }

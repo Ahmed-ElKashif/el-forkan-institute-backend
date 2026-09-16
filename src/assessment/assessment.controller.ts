@@ -53,7 +53,6 @@ export class AssessmentController {
     private readonly promotion: PromotionService,
   ) {}
 
-  // §3: "Create & schedule exams" is open to both roles.
   @Get('exams')
   listExams(
     @Query() query: ListExamsQueryDto,
@@ -62,7 +61,10 @@ export class AssessmentController {
     return this.exams.list(query, viewer);
   }
 
+  // Scheduling exams is the head teacher's job (they own the class day and the
+  // exam calendar); a teacher enters the marks but does not create the sitting.
   @Post('exams')
+  @Roles('head_teacher')
   createExam(
     @Body() dto: CreateExamDto,
     @CurrentActor() actor: Actor,

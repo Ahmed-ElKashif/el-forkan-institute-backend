@@ -713,6 +713,7 @@ model sessions {
   section_id                       String           @db.Uuid
   subject_id                       Int
   teacher_id                       String?          @db.Uuid
+  sheikh_name                      String?
   slot_id                          String?          @db.Uuid
   session_no                       Int?             @db.SmallInt
   session_date                     DateTime         @db.Date

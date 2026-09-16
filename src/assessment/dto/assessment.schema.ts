@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
+import { DateOnlySchema } from '../../common/date-only.schema';
 import { PageQuerySchema } from '../../common/pagination';
 
 const EXAM_TYPES = ['term_1', 'term_2', 'makeup', 'placement'] as const;
@@ -36,6 +37,9 @@ export const ListExamsQuerySchema = PageQuerySchema.extend({
   examType: z.enum(EXAM_TYPES).optional(),
   levelId: z.coerce.number().int().positive().optional(),
   isLocked: z.stringbool().optional(),
+  // The exams scheduled on one calendar day — the axis the teacher's date-first
+  // score entry navigates by.
+  date: DateOnlySchema.optional(),
 }).strict();
 
 // §4.6: eligibility is materialised and overridable, and an override must say

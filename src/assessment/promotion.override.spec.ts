@@ -26,7 +26,7 @@ const BRANCH_HEAD: AuthenticatedUser = {
   branchId: 1,
 };
 const TEACHER: AuthenticatedUser = { id: 't1', role: 'teacher', branchId: 1 };
-const ACTOR: Actor = { userId: 'h1', ip: null, userAgent: null };
+const ACTOR: Actor = { userId: 'h1' };
 
 /** One clean enrolment: nothing failed, so the engine says `promote`. */
 function enrollment(overrides: unknown[] = []) {

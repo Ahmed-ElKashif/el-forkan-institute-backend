@@ -18,7 +18,7 @@ const HEAD: AuthenticatedUser = {
   branchId: null,
 };
 const TEACHER: AuthenticatedUser = { id: 't1', role: 'teacher', branchId: 1 };
-const ACTOR: Actor = { userId: 'h1', ip: null, userAgent: null };
+const ACTOR: Actor = { userId: 'h1' };
 
 function enrollment(name: string, carries: string[] = []) {
   return {

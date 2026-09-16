@@ -1,14 +1,12 @@
 import {
   Body,
   Controller,
-  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseIntPipe,
   ParseUUIDPipe,
-  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -23,79 +21,43 @@ import {
   AttendanceService,
 } from './attendance.service';
 import {
-  CreateTimetableSlotDto,
-  GenerateSessionsDto,
+  AttendanceGridQueryDto,
+  CreateClassDayDto,
   SaveAttendanceDto,
-  UpdateTimetableSlotDto,
 } from './dto/teaching.schema';
-import { TimetableService, TimetableSlotView } from './timetable.service';
+import { SessionsService } from './sessions.service';
 
-// §3: "Set the timetable" is head-teacher only; recording attendance is a
+// §3: scheduling class days is head-teacher only; recording attendance is a
 // teacher's job on their own sections. The section scope enforces "own".
 @Controller()
 export class TeachingController {
   constructor(
-    private readonly timetable: TimetableService,
     private readonly attendance: AttendanceService,
+    private readonly sessions: SessionsService,
   ) {}
 
-  @Get('sections/:id/timetable')
-  listSlots(
-    @Param('id', ParseUUIDPipe) sectionId: string,
+  // Per-date scheduling (R4): the head teacher builds one class day at a time.
+  // Level-scoped so a `both` period reaches boys and girls in one call.
+  @Post('levels/:levelId/class-days')
+  @Roles('head_teacher')
+  createClassDay(
+    @Param('levelId', ParseIntPipe) levelId: number,
+    @Body() dto: CreateClassDayDto,
+    @CurrentActor() actor: Actor,
     @CurrentUser() viewer: AuthenticatedUser,
-  ): Promise<TimetableSlotView[]> {
-    return this.timetable.list(sectionId, viewer);
-  }
-
-  @Post('sections/:id/timetable')
-  @Roles('head_teacher')
-  createSlot(
-    @Param('id', ParseUUIDPipe) sectionId: string,
-    @Body() dto: CreateTimetableSlotDto,
-    @CurrentActor() actor: Actor,
-  ): Promise<TimetableSlotView> {
-    return this.timetable.create(sectionId, dto, actor);
-  }
-
-  @Patch('timetable-slots/:id')
-  @Roles('head_teacher')
-  updateSlot(
-    @Param('id', ParseUUIDPipe) slotId: string,
-    @Body() dto: UpdateTimetableSlotDto,
-    @CurrentActor() actor: Actor,
-  ): Promise<TimetableSlotView> {
-    return this.timetable.update(slotId, dto, actor);
-  }
-
-  @Delete('timetable-slots/:id')
-  @Roles('head_teacher')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  removeSlot(
-    @Param('id', ParseUUIDPipe) slotId: string,
-    @CurrentActor() actor: Actor,
-  ): Promise<void> {
-    return this.timetable.remove(slotId, actor);
-  }
-
-  @Post('sections/:id/sessions/generate')
-  @Roles('head_teacher')
-  generateSessions(
-    @Param('id', ParseUUIDPipe) sectionId: string,
-    @Body() dto: GenerateSessionsDto,
-    @CurrentActor() actor: Actor,
   ): Promise<{ created: number; skipped: number }> {
-    return this.timetable.generateSessions(sectionId, dto, actor);
+    return this.sessions.createClassDay(levelId, dto, actor, viewer);
   }
 
   // The grid a teacher actually works in: one request renders the whole
-  // student × session sheet for a term.
+  // student × session sheet for a term, or one class day's periods.
   @Get('sections/:id/attendance')
   getGrid(
     @Param('id', ParseUUIDPipe) sectionId: string,
-    @Query('termId', ParseIntPipe) termId: number,
+    @Query() query: AttendanceGridQueryDto,
     @CurrentUser() viewer: AuthenticatedUser,
   ): Promise<AttendanceGrid> {
-    return this.attendance.getGrid(sectionId, termId, viewer);
+    return this.attendance.getGrid(sectionId, query, viewer);
   }
 
   @Post('sessions/:id/attendance')

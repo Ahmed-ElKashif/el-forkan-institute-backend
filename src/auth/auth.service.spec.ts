@@ -54,7 +54,7 @@ function buildService(options: {
     consumed_at: null,
     attempts: 0,
   };
-  const usersUpdate = jest.fn(() => Promise.resolve(options.storedUser));
+  const usersUpdate = jest.fn((_args: { data: Record<string, unknown> }) => Promise.resolve(options.storedUser));
   const tokensRevoke = jest.fn(() => Promise.resolve({ count: 1 }));
   const prisma = {
     users: { update: usersUpdate },

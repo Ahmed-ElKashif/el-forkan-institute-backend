@@ -98,6 +98,17 @@ export class ExamsService {
       ...(query.examType ? { exam_type: query.examType } : {}),
       ...(query.isLocked === undefined ? {} : { is_locked: query.isLocked }),
       ...(query.levelId ? { curriculum: { level_id: query.levelId } } : {}),
+      // ponytail: a UTC-day window on scheduled_at (timestamptz). Exams are set
+      // for daytime Cairo hours, which never straddle a UTC day boundary, so a
+      // per-zone window would be complexity with no behavioural difference here.
+      ...(query.date
+        ? {
+            scheduled_at: {
+              gte: query.date,
+              lt: new Date(query.date.getTime() + 24 * 60 * 60 * 1000),
+            },
+          }
+        : {}),
     };
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.exams.findMany({
