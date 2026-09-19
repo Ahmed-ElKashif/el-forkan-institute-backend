@@ -40,9 +40,20 @@ export interface HeaderMatcher {
   prefixes?: string[];
   /** When true, a missing column makes the whole sheet unreadable. */
   required?: boolean;
+  /**
+   * When true, EVERY column whose header matches is collected, not just the
+   * first.
+   *
+   * §6.1: carries from earlier levels each get their own «مواد من المستوى …»
+   * column, and a roster exported for several levels at once carries one per
+   * level. Taking only the first would silently drop the rest — understating
+   * what a student still owes, which is worse than failing.
+   */
+  multiple?: boolean;
 }
 
-export type ColumnMap = Map<string, number>;
+/** Column indices per key, in sheet order. Single-column keys hold one entry. */
+export type ColumnMap = Map<string, number[]>;
 
 export class SheetLayoutError extends Error {}
 
@@ -67,6 +78,12 @@ export function mapColumns(
     }
   }
 
+  const multiple = new Set(
+    matchers
+      .filter((matcher) => matcher.multiple)
+      .map((matcher) => matcher.key),
+  );
+
   const searchRows = rows.slice(0, HEADER_SEARCH_ROWS);
   for (const row of searchRows) {
     row.forEach((cell, columnIndex) => {
@@ -78,17 +95,27 @@ export function mapColumns(
       const key =
         aliasIndex.get(normalized) ??
         prefixIndex.find((entry) => normalized.startsWith(entry.prefix))?.key;
-      // First match wins: a header repeated lower down (a merged continuation)
-      // must not move the column.
-      if (key !== undefined && !found.has(key)) {
-        found.set(key, columnIndex);
+      if (key === undefined) return;
+
+      const claimed = found.get(key);
+      if (claimed === undefined) {
+        found.set(key, [columnIndex]);
+        return;
+      }
+      // First match wins per COLUMN, not per key: the header is merged across
+      // rows 4-5, so the same column is seen twice and must not be counted
+      // twice. A `multiple` key still accepts a *different* column.
+      if (multiple.has(key) && !claimed.includes(columnIndex)) {
+        claimed.push(columnIndex);
       }
     });
   }
 
   const missing = matchers
     .filter((matcher) => matcher.required && !found.has(matcher.key))
-    .map((matcher) => matcher.aliases[0] ?? matcher.prefixes?.[0] ?? matcher.key);
+    .map(
+      (matcher) => matcher.aliases[0] ?? matcher.prefixes?.[0] ?? matcher.key,
+    );
   if (missing.length > 0) {
     throw new SheetLayoutError(
       `Sheet is missing required column(s): ${missing.join(', ')}`,
@@ -142,8 +169,14 @@ export function readDataRows(
       string,
       string
     >;
-    for (const [key, columnIndex] of columns) {
-      values[key] = (raw[columnIndex] ?? '').trim();
+    for (const [key, columnIndices] of columns) {
+      // Several columns under one key are joined with the separator the subject
+      // splitter already understands, so a merged cell parses exactly as a
+      // single column listing the same subjects would.
+      values[key] = columnIndices
+        .map((columnIndex) => (raw[columnIndex] ?? '').trim())
+        .filter((cell) => cell.length > 0)
+        .join(' / ');
     }
     // A row where every mapped column is blank is spacing or a footer, not a
     // student. Keeping it would produce an error row per blank line.

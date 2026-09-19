@@ -3,11 +3,11 @@ import { addDaysUtc, hijriToUtcDate, midpointUtc, toHijri } from './hijri';
 const iso = (date: Date) => date.toISOString().slice(0, 10);
 
 describe('hijriToUtcDate', () => {
-  // The regression this function exists for: @umalqura/core builds its Date at
-  // LOCAL midnight, so east of UTC that instant belongs to the previous UTC
-  // day and a Postgres DATE column stores it one day early. Asserting the UTC
-  // calendar day is what makes the bug visible; asserting the timestamp would
-  // pass in UTC and fail in Cairo.
+  // The converter deals in plain {year, month, day} records, so the only place
+  // a Date is built is here — in UTC. Asserting the UTC calendar day is what
+  // keeps that true: a local-midnight Date would pass in UTC and fail in Cairo,
+  // where the instant belongs to the previous UTC day and a Postgres DATE
+  // column would store it a day early.
   it('lands on the intended UTC calendar day, not the previous one', () => {
     expect(iso(hijriToUtcDate({ year: 1447, month: 10, day: 15 }))).toBe(
       '2026-04-03',
@@ -32,6 +32,27 @@ describe('hijriToUtcDate', () => {
 
     expect(end.getTime()).toBeGreaterThan(start.getTime());
     expect(iso(end)).toBe('2027-01-23');
+  });
+
+  // institute_settings accepts a boundary day of 1-30, but a Hijri month may
+  // have only 29 days in a given year. The boundary is a recurring rule, so
+  // "the 30th" has to resolve to the end of the month rather than refusing —
+  // otherwise planning the same institute succeeds in one year and 500s in the
+  // next. Jumada al-Thani 1447 has 29 days; Muharram 1447 has 30.
+  it('clamps a 30th that does not exist to the end of that month', () => {
+    expect(iso(hijriToUtcDate({ year: 1447, month: 6, day: 30 }))).toBe(
+      iso(hijriToUtcDate({ year: 1447, month: 6, day: 29 })),
+    );
+  });
+
+  it('leaves a 30th that does exist alone', () => {
+    expect(iso(hijriToUtcDate({ year: 1447, month: 1, day: 30 }))).not.toBe(
+      iso(hijriToUtcDate({ year: 1447, month: 1, day: 29 })),
+    );
+  });
+
+  it('still refuses a year outside the supported range', () => {
+    expect(() => hijriToUtcDate({ year: 1501, month: 8, day: 15 })).toThrow();
   });
 });
 

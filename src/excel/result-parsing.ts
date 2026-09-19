@@ -90,7 +90,7 @@ export function splitSubjectList(cellText: string): string[] {
   for (const piece of cellText.split(SEPARATORS)) {
     const token = stripLeadingConjunction(piece.trim());
     const key = normalizeArabic(token);
-    if (key.length === 0 || seen.has(key)) {
+    if (key.length === 0 || !hasLetters(key) || seen.has(key)) {
       continue;
     }
     seen.add(key);
@@ -98,6 +98,19 @@ export function splitSubjectList(cellText: string): string[] {
   }
 
   return tokens;
+}
+
+/**
+ * A subject name always contains letters. A cell holding only punctuation is a
+ * placeholder, not a subject.
+ *
+ * The export prints «—» in a carry column a student owes nothing to, so that an
+ * empty cell cannot be mistaken for a column nobody filled in. Reading that
+ * dash back as a token would resolve against no alias and turn a clean row into
+ * an error row — the file this codebase writes has to be a file it can read.
+ */
+function hasLetters(normalized: string): boolean {
+  return /\p{L}/u.test(normalized);
 }
 
 /**

@@ -5,8 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { parsePhoneNumberWithError } from 'libphonenumber-js';
 import { resolveWritableBranch } from '../common/access-scope';
+import { normalizeImportedPhone } from '../common/phone';
 import { normalizeArabic } from '../common/arabic';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
@@ -16,6 +16,7 @@ import { parseHijriYear } from '../excel/result-parsing';
 import {
   ColumnMap,
   genderForSheetName,
+  HeaderMatcher,
   mapColumns,
   readDataRows,
   SheetLayoutError,
@@ -46,7 +47,7 @@ import {
 
 // §6.2 — matched by header TEXT, never by column index, because L1/L3 start at
 // column C and PREP starts at column F.
-const ROSTER_COLUMNS = [
+export const ROSTER_COLUMNS: HeaderMatcher[] = [
   { key: 'serial', aliases: ['م', 'مسلسل'] },
   { key: 'name', aliases: ['الأسم', 'الاسم', 'اسم الطالب'], required: true },
   { key: 'markaz', aliases: ['المركز', 'مركز'] },
@@ -56,7 +57,7 @@ const ROSTER_COLUMNS = [
   },
 ];
 
-const RESULT_COLUMNS = [
+export const RESULT_COLUMNS: HeaderMatcher[] = [
   { key: 'serial', aliases: ['م', 'مسلسل'] },
   { key: 'name', aliases: ['الأسم', 'الاسم', 'اسم الطالب'], required: true },
   // The real decision header names the destination level and so changes per
@@ -81,6 +82,9 @@ const RESULT_COLUMNS = [
     key: 'priorLevelSubjects',
     aliases: [],
     prefixes: ['مواد من المستوى'],
+    // An export covering several levels writes one such column per origin
+    // level; all of them are this student's debt, so all of them are read.
+    multiple: true,
   },
 ];
 
@@ -582,7 +586,7 @@ export class ImportService {
       gender: 'male' | 'female';
       markazId?: number | null;
     };
-    const phone = toE164OrNull(parsed.rawPhone);
+    const phone = normalizeImportedPhone(parsed.rawPhone);
 
     const studentId =
       row.action === 'create'
@@ -746,21 +750,6 @@ export class ImportService {
       }
     }
     return counts;
-  }
-}
-
-// §6.2: phones go through libphonenumber-js region EG. An unparseable number
-// becomes null rather than a rejection — the roster is names-first, and losing
-// the whole row over a malformed phone would block the back-fill.
-function toE164OrNull(raw: string): string | null {
-  if (raw.trim().length === 0) {
-    return null;
-  }
-  try {
-    const parsed = parsePhoneNumberWithError(raw.trim(), 'EG');
-    return parsed.isValid() ? parsed.number : null;
-  } catch {
-    return null;
   }
 }
 

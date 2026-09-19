@@ -488,7 +488,12 @@ export class PromotionService {
       );
     }
 
-    const targetSections = await this.loadTargetSections(dto);
+    await this.assertTargetFollowsSource(dto);
+
+    const targetSections = await this.loadTargetSections(
+      dto,
+      new Map(selected.map((row) => [row.enrollmentId, row.decision])),
+    );
 
     let enrollmentsCreated = 0;
     let carriesWritten = 0;
@@ -498,91 +503,109 @@ export class PromotionService {
     // A level's run can decide dozens of enrolments, each 2–6 serial writes to
     // remote Postgres; the default 5s interactive-transaction budget (P2028) is
     // too tight for a whole level, so give the batch room.
-    await this.prisma.$transaction(async (tx) => {
-      for (const row of selected) {
-        await tx.enrollments.update({
-          where: { id: row.enrollmentId },
-          data: {
-            final_decision: row.decision,
-            decided_at: new Date(),
-            decided_by: actor.userId,
-            // A student sent to a makeup is not finished with the year yet.
-            status: row.decision === 'makeup_required' ? 'active' : 'completed',
-          },
-        });
-
-        // A graduate has finished the institute (a clean terminal level, L4 or
-        // COMP): mark the student, so they leave the active rosters and land in
-        // the graduates registry. Idempotent — re-running a confirmed run just
-        // re-sets the same status.
-        if (row.decision === 'graduate') {
-          await tx.students.update({
-            where: { id: row.studentId },
-            data: { status: 'graduated' },
-          });
-          graduated += 1;
-          continue;
-        }
-        // A makeup is still this year's business — no next level to go to yet.
-        if (row.decision === 'makeup_required') {
-          continue;
-        }
-
-        const target = targetSections.get(row.enrollmentId);
-        if (!target) {
-          notMovedForward += 1;
-          continue;
-        }
-
-        const next = await tx.enrollments.upsert({
-          // enrollments is UNIQUE (student_id, academic_year_id), so re-running
-          // a confirmed promotion reuses next year's row rather than failing.
-          where: {
-            student_id_academic_year_id: {
-              student_id: row.studentId,
-              academic_year_id: target.academic_year_id,
+    await this.prisma.$transaction(
+      async (tx) => {
+        for (const row of selected) {
+          await tx.enrollments.update({
+            where: { id: row.enrollmentId },
+            data: {
+              final_decision: row.decision,
+              decided_at: new Date(),
+              decided_by: actor.userId,
+              // A student sent to a makeup is not finished with the year yet.
+              status:
+                row.decision === 'makeup_required' ? 'active' : 'completed',
             },
-          },
-          create: {
-            student_id: row.studentId,
-            section_id: target.id,
-            academic_year_id: target.academic_year_id,
-            branch_id: target.branch_id,
-            gender: target.gender,
-            entry_type: entryTypeFor(row.decision),
-            created_by: actor.userId,
-          },
-          update: {},
-        });
-        if (next.created_at.getTime() > Date.now() - 60_000) {
-          enrollmentsCreated += 1;
-        }
+          });
 
-        // §4.3: "promote_with_carry writes one carried_subjects row per
-        // still-failed subject with from_enrollment_id and origin_level_id."
-        if (row.decision === 'promote_with_carry') {
-          for (const subject of row.failedSubjects) {
-            await tx.carried_subjects.upsert({
-              where: {
-                enrollment_id_subject_id_origin_level_id: {
+          // A graduate has finished the institute (a clean terminal level, L4 or
+          // COMP): mark the student, so they leave the active rosters and land in
+          // the graduates registry. Idempotent — re-running a confirmed run just
+          // re-sets the same status.
+          if (row.decision === 'graduate') {
+            await tx.students.update({
+              where: { id: row.studentId },
+              data: { status: 'graduated' },
+            });
+            graduated += 1;
+            continue;
+          }
+          // A makeup is still this year's business — no next level to go to yet.
+          if (row.decision === 'makeup_required') {
+            continue;
+          }
+
+          const target = targetSections.get(row.enrollmentId);
+          if (!target) {
+            notMovedForward += 1;
+            continue;
+          }
+
+          const next = await tx.enrollments.upsert({
+            // enrollments is UNIQUE (student_id, academic_year_id), so re-running
+            // a confirmed promotion reuses next year's row rather than failing.
+            where: {
+              student_id_academic_year_id: {
+                student_id: row.studentId,
+                academic_year_id: target.academic_year_id,
+              },
+            },
+            create: {
+              student_id: row.studentId,
+              section_id: target.id,
+              academic_year_id: target.academic_year_id,
+              branch_id: target.branch_id,
+              gender: target.gender,
+              entry_type: entryTypeFor(row.decision),
+              created_by: actor.userId,
+            },
+            update: {},
+          });
+          if (next.created_at.getTime() > Date.now() - 60_000) {
+            enrollmentsCreated += 1;
+          }
+
+          /* §4.3: "promote_with_carry writes one carried_subjects row per
+           * still-failed subject with from_enrollment_id and origin_level_id."
+           *
+           * A `repeat` writes the same rows, and that is the point of them: a
+           * repeater is not starting the level again from nothing, they are
+           * retaking the subjects they failed. Recording exactly those turns
+           * "repeats المستوى الثاني" into "owes الفقه and النحو from المستوى
+           * الثاني", which is what the roster, the COMP gate and the export all
+           * already read. The only difference between the two decisions is the
+           * level the new enrolment sits in, which `loadTargetSections` settles.
+           *
+           * `origin_level_id` is the level the subject was failed at either way,
+           * so a repeater's debt stays attributable to the year it came from. */
+          if (
+            row.decision === 'promote_with_carry' ||
+            row.decision === 'repeat'
+          ) {
+            for (const subject of row.failedSubjects) {
+              await tx.carried_subjects.upsert({
+                where: {
+                  enrollment_id_subject_id_origin_level_id: {
+                    enrollment_id: next.id,
+                    subject_id: subject.subjectId,
+                    origin_level_id: row.levelId,
+                  },
+                },
+                create: {
                   enrollment_id: next.id,
+                  from_enrollment_id: row.enrollmentId,
                   subject_id: subject.subjectId,
                   origin_level_id: row.levelId,
                 },
-              },
-              create: {
-                enrollment_id: next.id,
-                from_enrollment_id: row.enrollmentId,
-                subject_id: subject.subjectId,
-                origin_level_id: row.levelId,
-              },
-              update: {},
-            });
-            carriesWritten += 1;
+                update: {},
+              });
+              carriesWritten += 1;
+            }
           }
         }
-      }
-    }, { maxWait: 10_000, timeout: 60_000 });
+      },
+      { maxWait: 10_000, timeout: 60_000 },
+    );
 
     await this.audit.record(actor, {
       action: 'promotion.confirm',
@@ -611,15 +634,56 @@ export class PromotionService {
   }
 
   /**
+   * Refuses a target year that does not come after the source year.
+   *
+   * `academic_years.id` is an autoincrement and carries no chronology —
+   * `hijri_year` is what orders years — so nothing about the ids being 5 and 2
+   * says which way round they are. Without this a closed earlier year is a
+   * perfectly valid target and a whole level can be promoted *backwards* into
+   * it, which the preview would have shown as an ordinary successful run.
+   */
+  private async assertTargetFollowsSource(dto: ConfirmPromotionDto) {
+    if (dto.targetAcademicYearId === undefined) return;
+
+    if (dto.targetAcademicYearId === dto.academicYearId) {
+      throw new BadRequestException(
+        'The target year is the year being closed; promotion moves students into a later year',
+      );
+    }
+
+    const years = await this.prisma.academic_years.findMany({
+      where: { id: { in: [dto.academicYearId, dto.targetAcademicYearId] } },
+      select: { id: true, hijri_year: true },
+    });
+    const source = years.find((year) => year.id === dto.academicYearId);
+    const target = years.find((year) => year.id === dto.targetAcademicYearId);
+    if (!source || !target) {
+      throw new BadRequestException('Unknown academic year');
+    }
+    if (target.hijri_year <= source.hijri_year) {
+      throw new BadRequestException(
+        `Cannot promote into ${target.hijri_year}: it does not come after ${source.hijri_year}`,
+      );
+    }
+  }
+
+  /**
    * Resolves, per selected enrolment, the section next year's enrolment goes
-   * into: the level after this one, in the target year, matching the student's
-   * gender and branch (R3 — a roster cannot mix).
+   * into, in the target year and matching the student's gender and branch
+   * (R3 — a roster cannot mix).
+   *
+   * **The decision decides the level.** This used to take only the DTO, so it
+   * advanced `sort_order + 1` for every row alike and a student decided
+   * `repeat` was enrolled into the *next* level carrying `entry_type:
+   * 'repeater'` — the verdict said they stayed, the roster said they moved up.
+   * A repeat now stays at the level it repeats.
    *
    * Levels advance by `sort_order`, which R1 fixes, so "the next level" is a
-   * lookup rather than a hardcoded chain. A repeat stays at the same level.
+   * lookup rather than a hardcoded chain.
    */
   private async loadTargetSections(
     dto: ConfirmPromotionDto,
+    decisions: Map<string, PromotionDecision>,
   ): Promise<Map<string, TargetSection>> {
     const targets = new Map<string, TargetSection>();
     if (dto.targetAcademicYearId === undefined) {
@@ -647,13 +711,16 @@ export class PromotionService {
       );
       if (!current) continue;
 
-      // A repeat stays put; everything else advances one level. COMP is never
-      // reached automatically — R20 makes it a gate on enrolment, chosen by
-      // the student, so it is excluded from the automatic next step.
+      // A repeat stays put. Everything else advances one level — except into a
+      // level that requires clean entry: R20 makes COMP a gate chosen by the
+      // student, never a step a promotion run sweeps them into.
       const nextLevel =
         levelBySortOrder.get(current.sort_order + 1) ?? undefined;
+      const advances = decisions.get(enrollment.id) !== 'repeat';
       const wanted =
-        nextLevel && !nextLevel.requires_clean_entry ? nextLevel : current;
+        advances && nextLevel && !nextLevel.requires_clean_entry
+          ? nextLevel
+          : current;
 
       const section = sections.find(
         (candidate) =>

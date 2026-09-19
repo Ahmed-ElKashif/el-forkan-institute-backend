@@ -329,13 +329,22 @@ export class SectionsService {
         },
       });
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2003'
-      ) {
-        throw new ConflictException(
-          `This section is ${section.gender}; only ${section.gender} teachers can be assigned to it`,
-        );
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === 'P2003') {
+          throw new ConflictException(
+            `This section is ${section.gender}; only ${section.gender} teachers can be assigned to it`,
+          );
+        }
+        /* The partial unique index `section_teachers_one_primary_per_section`
+         * allows one primary per section — which is how a level ends up with
+         * exactly two responsible teachers, one for each gender's class. Left
+         * unmapped this surfaced as a bare P2002, telling the head teacher
+         * nothing about which rule stopped them or what to do next. */
+        if (error.code === 'P2002') {
+          throw new ConflictException(
+            'This class already has a responsible teacher; remove the current one before naming another',
+          );
+        }
       }
       throw error;
     }
@@ -423,7 +432,10 @@ export class SectionsService {
     // debt, so this counts exactly "subjects owed from an earlier level".
     const carryCounts = await this.prisma.carried_subjects.groupBy({
       by: ['enrollment_id'],
-      where: { status: 'pending', enrollment_id: { in: rows.map((row) => row.id) } },
+      where: {
+        status: 'pending',
+        enrollment_id: { in: rows.map((row) => row.id) },
+      },
       _count: { _all: true },
     });
     const pendingByEnrollment = new Map(
@@ -431,7 +443,9 @@ export class SectionsService {
     );
 
     return buildPage(
-      rows.map((row) => toEnrollment(row, pendingByEnrollment.get(row.id) ?? 0)),
+      rows.map((row) =>
+        toEnrollment(row, pendingByEnrollment.get(row.id) ?? 0),
+      ),
       total,
       query,
     );
@@ -544,7 +558,9 @@ export class SectionsService {
 
     if (target.id === before.section_id) return toEnrollment(before);
     if (target.academic_year_id !== before.academic_year_id) {
-      throw new BadRequestException('A transfer must stay within the same academic year');
+      throw new BadRequestException(
+        'A transfer must stay within the same academic year',
+      );
     }
     if (target.gender !== before.gender) {
       throw new ConflictException(
@@ -627,7 +643,10 @@ function toSection(row: SectionRecord): SectionView {
 /** `pendingCarryCount` is supplied by the roster read (it groups carries for the
  *  whole page at once); the single-row write paths have no carries to show and
  *  pass the default. */
-function toEnrollment(row: EnrollmentRecord, pendingCarryCount = 0): EnrollmentView {
+function toEnrollment(
+  row: EnrollmentRecord,
+  pendingCarryCount = 0,
+): EnrollmentView {
   return {
     id: row.id,
     studentId: row.student_id,

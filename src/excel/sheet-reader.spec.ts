@@ -171,7 +171,12 @@ describe('reading a real-shaped roster', () => {
 describe('mapColumns prefix matching', () => {
   const RESULT_MATCHERS = [
     { key: 'name', aliases: ['الأسم', 'الاسم'], required: true },
-    { key: 'decision', aliases: ['النتيجة'], prefixes: ['الانتقال الى المستوى'], required: true },
+    {
+      key: 'decision',
+      aliases: ['النتيجة'],
+      prefixes: ['الانتقال الى المستوى'],
+      required: true,
+    },
     { key: 'carrySubjects', aliases: [], prefixes: ['اجتاز بمواد من المستوى'] },
     { key: 'priorLevelSubjects', aliases: [], prefixes: ['مواد من المستوى'] },
     { key: 'repeatSubjects', aliases: ['مواد إعادة المستوى'] },
@@ -193,12 +198,91 @@ describe('mapColumns prefix matching', () => {
 
     const columns = mapColumns(rows, RESULT_MATCHERS);
 
-    expect(columns.get('decision')).toBe(3);
-    expect(columns.get('carrySubjects')).toBe(4);
-    expect(columns.get('priorLevelSubjects')).toBe(5);
+    expect(columns.get('decision')).toEqual([3]);
+    expect(columns.get('carrySubjects')).toEqual([4]);
+    expect(columns.get('priorLevelSubjects')).toEqual([5]);
     // The exact alias wins, so the constant repeat header is not swallowed by
     // the «مواد من المستوى» prefix that its column also starts with.
-    expect(columns.get('repeatSubjects')).toBe(6);
+    expect(columns.get('repeatSubjects')).toEqual([6]);
+  });
+
+  // An export covering several levels writes one «مواد من المستوى …» column per
+  // origin level. Reading only the first understates the debt, so the matcher
+  // is marked `multiple` and every matching column is collected.
+  it('collects every column a `multiple` matcher matches', () => {
+    const headerRow = [
+      'الأسم',
+      'مواد من المستوى الأول',
+      'مواد من المستوى الثانى',
+      'مواد من المستوى الثالث',
+    ];
+    const rows = [[], [], [], headerRow];
+
+    const columns = mapColumns(rows, [
+      { key: 'name', aliases: ['الأسم'], required: true },
+      {
+        key: 'priorLevelSubjects',
+        aliases: [],
+        prefixes: ['مواد من المستوى'],
+        multiple: true,
+      },
+    ]);
+
+    expect(columns.get('priorLevelSubjects')).toEqual([1, 2, 3]);
+  });
+
+  // The header is merged across rows 4-5, so every column is seen twice. A
+  // `multiple` key must not count the same column once per row.
+  it('does not collect the same column twice from a merged header', () => {
+    const headerRow = [
+      'الأسم',
+      'مواد من المستوى الأول',
+      'مواد من المستوى الثانى',
+    ];
+    const rows = [[], [], [], headerRow, headerRow];
+
+    const columns = mapColumns(rows, [
+      { key: 'name', aliases: ['الأسم'], required: true },
+      {
+        key: 'priorLevelSubjects',
+        aliases: [],
+        prefixes: ['مواد من المستوى'],
+        multiple: true,
+      },
+    ]);
+
+    expect(columns.get('priorLevelSubjects')).toEqual([1, 2]);
+  });
+
+  // The merged value has to parse exactly as one column listing the same
+  // subjects would — `/` is already what splitSubjectList splits on.
+  it('joins a multiple matcher’s columns into one value', () => {
+    const rows = [
+      [],
+      [],
+      [],
+      ['الأسم', 'مواد من المستوى الأول', 'مواد من المستوى الثانى'],
+      [],
+      ['أحمد', 'فقه', 'نحو/عقيدة'],
+      ['محمود', '', 'تفسير'],
+    ];
+
+    const columns = mapColumns(rows, [
+      { key: 'name', aliases: ['الأسم'], required: true },
+      {
+        key: 'priorLevelSubjects',
+        aliases: [],
+        prefixes: ['مواد من المستوى'],
+        multiple: true,
+      },
+    ]);
+    const parsed = readDataRows(rows, columns);
+
+    expect(parsed.map((row) => row.values.priorLevelSubjects)).toEqual([
+      'فقه / نحو/عقيدة',
+      // An empty column contributes nothing rather than a dangling separator.
+      'تفسير',
+    ]);
   });
 });
 

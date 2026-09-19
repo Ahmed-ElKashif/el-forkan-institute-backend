@@ -15,35 +15,93 @@ import type { AuthenticatedUser } from '../auth/interfaces/authenticated-user.in
  * building.
  */
 
-const ROSTER_HEADERS = [
-  'م',
-  'الأسم',
-  'المركز',
-  'رقم الهاتف',
-  'المواد المحمولة',
-] as const;
-const RESULT_HEADERS = ['م', 'الأسم', 'النتيجة', 'المواد المتبقية'] as const;
+const ROSTER_HEADERS = ['م', 'الأسم', 'المركز', 'رقم الهاتف'] as const;
+const RESULT_HEADERS = ['م', 'الأسم', 'النتيجة'] as const;
+
+/** Owing nothing from a level still prints a cell. An empty cell in a printed
+ *  roster is indistinguishable from a column somebody forgot to fill in. */
+const NOTHING_OWED = '—';
 
 /** An enrolment carrying debt, in the only shape the export cares about. */
 interface CarryBearingEnrollment {
   carried_subjects_carried_subjects_enrollment_idToenrollments: Array<{
     status: string;
+    origin_level_id: number;
     subjects: { name_ar: string };
+    levels: { id: number; name_ar: string; sort_order: number };
   }>;
 }
 
 /**
- * The subjects an enrolment still owes, as the paper roster lists them.
+ * The still-owed subjects of one enrolment, grouped by the level they were
+ * failed at.
  *
  * Only `pending` counts. A cleared carry is settled debt, and printing it would
  * read to the head teacher as a failure the student has already made good —
  * which is the same reason R20's COMP gate counts pending rows alone.
  */
-function pendingCarryNames(enrollment: CarryBearingEnrollment): string {
-  return enrollment.carried_subjects_carried_subjects_enrollment_idToenrollments
-    .filter((carry) => carry.status === 'pending')
-    .map((carry) => carry.subjects.name_ar)
-    .join(' / ');
+function pendingCarriesByLevel(
+  enrollment: CarryBearingEnrollment,
+): Map<number, string[]> {
+  const byLevel = new Map<number, string[]>();
+  for (const carry of enrollment.carried_subjects_carried_subjects_enrollment_idToenrollments) {
+    if (carry.status !== 'pending') continue;
+    const names = byLevel.get(carry.origin_level_id) ?? [];
+    names.push(carry.subjects.name_ar);
+    byLevel.set(carry.origin_level_id, names);
+  }
+  return byLevel;
+}
+
+/** One column per level anybody in this export still owes something to. */
+interface CarryColumn {
+  levelId: number;
+  header: string;
+}
+
+/**
+ * §6.1 — the institute's own sheets give each origin level its own column
+ * («إجتاز بمواد من المستوى الثانى» beside «مواد من المستوى الأول») rather than
+ * one merged list. Doing the same keeps the export readable *and* keeps it
+ * re-importable: those are the exact headers `RESULT_COLUMNS` matches, and the
+ * `priorLevelSubjects` matcher is `multiple` so it reads every one of them.
+ *
+ * Which columns exist is derived from the data, not fixed, because which levels
+ * are owed to depends entirely on who is in the export.
+ */
+function carryColumnsFor(sections: ScopedSection[]): CarryColumn[] {
+  const levels = new Map<number, { nameAr: string; sortOrder: number }>();
+  for (const section of sections) {
+    for (const enrollment of section.enrollments) {
+      for (const carry of enrollment.carried_subjects_carried_subjects_enrollment_idToenrollments) {
+        if (carry.status !== 'pending') continue;
+        levels.set(carry.origin_level_id, {
+          nameAr: carry.levels.name_ar,
+          sortOrder: carry.levels.sort_order,
+        });
+      }
+    }
+  }
+
+  // Oldest level first, so the debt reads chronologically across the page.
+  return [...levels]
+    .sort((a, b) => a[1].sortOrder - b[1].sortOrder)
+    .map(([levelId, level]) => ({
+      levelId,
+      header: `مواد من ${level.nameAr}`,
+    }));
+}
+
+/** This enrolment's cells for the carry columns, in the columns' own order. */
+function carryCells(
+  enrollment: CarryBearingEnrollment,
+  columns: CarryColumn[],
+): string[] {
+  const byLevel = pendingCarriesByLevel(enrollment);
+  return columns.map((column) => {
+    const names = byLevel.get(column.levelId);
+    return names && names.length > 0 ? names.join(' / ') : NOTHING_OWED;
+  });
 }
 
 const DECISION_LABELS: Record<string, string> = {
@@ -108,9 +166,12 @@ export class ExportService {
    * than no preview at all.
    */
   private buildRosterSheets(sections: ScopedSection[]): Sheet[] {
+    // One column set for the whole file, so both gender sheets line up and the
+    // workbook reads as a single document.
+    const carries = carryColumnsFor(sections);
     return ['male', 'female'].map((gender) => ({
       name: GENDER_SHEET_NAMES[gender],
-      headers: [...ROSTER_HEADERS],
+      headers: [...ROSTER_HEADERS, ...carries.map((column) => column.header)],
       rows: sections
         .filter((section) => section.gender === gender)
         .flatMap((section) => section.enrollments)
@@ -119,16 +180,17 @@ export class ExportService {
           enrollment.student.full_name,
           enrollment.student.markazes?.name_ar ?? '',
           enrollment.student.whatsapp_phone ?? enrollment.student.phone ?? '',
-          pendingCarryNames(enrollment),
+          ...carryCells(enrollment, carries),
         ]),
     }));
   }
 
   /** The result sheet, same shape and same reason as {@link buildRosterSheets}. */
   private buildResultSheets(sections: ScopedSection[]): Sheet[] {
+    const carries = carryColumnsFor(sections);
     return ['male', 'female'].map((gender) => ({
       name: GENDER_SHEET_NAMES[gender],
-      headers: [...RESULT_HEADERS],
+      headers: [...RESULT_HEADERS, ...carries.map((column) => column.header)],
       rows: sections
         .filter((section) => section.gender === gender)
         .flatMap((section) => section.enrollments)
@@ -139,7 +201,7 @@ export class ExportService {
             ? (DECISION_LABELS[enrollment.final_decision] ??
               enrollment.final_decision)
             : '',
-          pendingCarryNames(enrollment),
+          ...carryCells(enrollment, carries),
         ]),
     }));
   }
@@ -252,7 +314,13 @@ export class ExportService {
               },
             },
             carried_subjects_carried_subjects_enrollment_idToenrollments: {
-              include: { subjects: { select: { name_ar: true } } },
+              include: {
+                subjects: { select: { name_ar: true } },
+                // The origin level names the column this carry belongs in.
+                levels: {
+                  select: { id: true, name_ar: true, sort_order: true },
+                },
+              },
             },
           },
         },
