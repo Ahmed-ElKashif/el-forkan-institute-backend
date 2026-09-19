@@ -17,7 +17,6 @@ import type { CorrectScoreDto, SaveScoresDto } from './dto/assessment.schema';
 export interface ScoreRow {
   enrollmentId: string;
   studentName: string;
-  studentCode: string;
   resultId: string | null;
   score: number | null;
   isAbsent: boolean;
@@ -175,7 +174,7 @@ export class ResultsService {
       include: {
         enrollments: {
           include: {
-            student: { select: { full_name: true, student_code: true } },
+            student: { select: { full_name: true } },
             exam_results: { where: { exam_id: examId } },
           },
         },
@@ -195,7 +194,6 @@ export class ResultsService {
         return {
           enrollmentId: row.enrollment_id,
           studentName: row.enrollments.student.full_name,
-          studentCode: row.enrollments.student.student_code,
           resultId: existing?.id ?? null,
           score: existing?.score?.toNumber() ?? null,
           isAbsent: existing?.is_absent ?? false,
@@ -357,7 +355,7 @@ export class ResultsService {
         exams: { include: { curriculum: true } },
         enrollments: {
           include: {
-            student: { select: { full_name: true, student_code: true } },
+            student: { select: { full_name: true } },
           },
         },
       },
@@ -451,7 +449,6 @@ export class ResultsService {
     return {
       enrollmentId: updated.enrollment_id,
       studentName: before.enrollments.student.full_name,
-      studentCode: before.enrollments.student.student_code,
       resultId: updated.id,
       score: updated.score?.toNumber() ?? null,
       isAbsent: updated.is_absent,

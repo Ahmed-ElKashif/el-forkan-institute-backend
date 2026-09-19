@@ -29,9 +29,6 @@ export const CreateStudentSchema = z
     fullName: ArabicNameSchema,
     gender: z.enum(GENDERS),
     branchId: z.number().int().positive().nullable().default(null),
-    // student_code is generated when omitted; §10 item 3 leaves the format to
-    // the institute, so an explicit value always wins.
-    studentCode: z.string().trim().min(1).max(40).optional(),
     phone: PhoneSchema.nullable().optional(),
     whatsappPhone: PhoneSchema.nullable().optional(),
     governorateId: z.number().int().positive().nullable().optional(),

@@ -369,16 +369,12 @@ export class ImportService {
       );
     }
 
-    // Seed the student-code sequence once, before the transaction, so the apply
-    // loop allocates codes in memory instead of a findFirst per created row.
-    const allocateCode = await studentCodeAllocator(this.prisma);
-
     let deferredCarries = 0;
     await this.prisma.$transaction(
       async (tx) => {
         for (const row of rows) {
           if (job.import_type === 'roster') {
-            await this.applyRosterRow(tx, row, targeting, allocateCode);
+            await this.applyRosterRow(tx, row, targeting);
           } else {
             deferredCarries += await this.applyResultRow(tx, row, targeting);
           }
@@ -578,7 +574,6 @@ export class ImportService {
       action: string | null;
     },
     dto: CommitTargeting,
-    allocateCode: () => string,
   ): Promise<void> {
     const parsed = row.parsed as {
       fullName: string;
@@ -594,7 +589,6 @@ export class ImportService {
         ? (
             await tx.students.create({
               data: {
-                student_code: allocateCode(),
                 full_name: parsed.fullName,
                 gender: parsed.gender,
                 branch_id: dto.branchId,
@@ -768,28 +762,6 @@ function toE164OrNull(raw: string): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Reads the current highest `YYYY-NNNN` sequence once and returns an allocator
- * that hands out the next code from memory on each call. Moving this out of the
- * per-row loop is what keeps a large roster commit inside its transaction
- * budget — the previous per-row findFirst was the query that timed out. Codes
- * stay unique via the DB constraint; a concurrent create (rare for a one-off
- * admin import) would abort the commit, exactly as the per-row version did.
- */
-async function studentCodeAllocator(db: PrismaService): Promise<() => string> {
-  const yearPrefix = String(new Date().getUTCFullYear());
-  const latest = await db.students.findFirst({
-    where: { student_code: { startsWith: `${yearPrefix}-` } },
-    orderBy: { student_code: 'desc' },
-    select: { student_code: true },
-  });
-  const parsed = latest
-    ? Number.parseInt(latest.student_code.split('-')[1] ?? '0', 10)
-    : 0;
-  let sequence = Number.isNaN(parsed) ? 0 : parsed;
-  return () => `${yearPrefix}-${String(++sequence).padStart(4, '0')}`;
 }
 
 function countActions(

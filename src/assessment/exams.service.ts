@@ -50,7 +50,6 @@ export interface EligibilityRow {
   id: string;
   enrollmentId: string;
   studentName: string;
-  studentCode: string;
   isEligible: boolean;
   reasonCode: string;
   reasonNote: string | null;
@@ -71,7 +70,7 @@ type ExamRecord = Prisma.examsGetPayload<typeof EXAM_SHAPE>;
 const ELIGIBILITY_SHAPE = {
   include: {
     enrollments: {
-      include: { student: { select: { full_name: true, student_code: true } } },
+      include: { student: { select: { full_name: true } } },
     },
   },
 } satisfies Prisma.exam_eligibilityDefaultArgs;
@@ -552,7 +551,6 @@ function toEligibilityRow(row: EligibilityRecord): EligibilityRow {
     id: row.id,
     enrollmentId: row.enrollment_id,
     studentName: row.enrollments.student.full_name,
-    studentCode: row.enrollments.student.student_code,
     isEligible: row.is_eligible,
     reasonCode: row.reason_code,
     reasonNote: row.reason_note,

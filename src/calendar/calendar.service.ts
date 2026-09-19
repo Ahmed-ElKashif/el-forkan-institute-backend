@@ -133,16 +133,28 @@ export class CalendarService {
       throw new BadRequestException('endsOn must be after startsOn');
     }
 
-    const updated = await this.prisma.academic_years.update({
-      where: { id },
-      data: {
-        starts_on: dto.startsOn,
-        ends_on: dto.endsOn,
-        status: dto.status,
-        updated_by: actor.userId,
-        updated_at: new Date(),
-      },
-      include: { terms: { orderBy: { term_number: 'asc' } } },
+    // Exactly one year is current. Promoting this one to `active` closes any
+    // other active year in the same transaction, so "set as current" is
+    // exclusive — the invariant the whole app's "current year" resolution and
+    // the Years & Terms screen rely on.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (dto.status === 'active') {
+        await tx.academic_years.updateMany({
+          where: { status: 'active', id: { not: id } },
+          data: { status: 'closed', updated_by: actor.userId, updated_at: new Date() },
+        });
+      }
+      return tx.academic_years.update({
+        where: { id },
+        data: {
+          starts_on: dto.startsOn,
+          ends_on: dto.endsOn,
+          status: dto.status,
+          updated_by: actor.userId,
+          updated_at: new Date(),
+        },
+        include: { terms: { orderBy: { term_number: 'asc' } } },
+      });
     });
 
     const view = toAcademicYear(updated);

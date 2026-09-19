@@ -84,7 +84,7 @@ function correctOneMark(
     score: new Prisma.Decimal(20),
     result: 'fail',
     exams: { branch_id: 1, curriculum: CURRICULUM },
-    enrollments: { student: { full_name: 'أحمد', student_code: 'S-1' } },
+    enrollments: { student: { full_name: 'أحمد' } },
   });
   built.tx.exam_results.update.mockResolvedValue({
     id: 'res1',

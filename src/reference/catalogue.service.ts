@@ -1,18 +1,37 @@
 import { ConflictException, Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { normalizeArabic } from '../common/arabic';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
-import { buildPage, Page, PageQuery, toPrismaPage } from '../common/pagination';
+import { buildPage, Page, toPrismaPage } from '../common/pagination';
 import { PrismaService } from '../prisma/prisma.service';
 import type {
   CreateAliasDto,
   CreateBookDto,
   CreateSubjectDto,
+  ListBooksQueryDto,
   ListSubjectsQueryDto,
   UpdateBookDto,
   UpdateLevelDto,
   UpdateSubjectDto,
 } from './dto/catalogue.schema';
+
+/** Generated subject codes look like `S007`. Only codes of this exact shape are
+ *  considered when picking the next one, so a hand-written `NAHW` never shifts
+ *  the sequence. */
+const GENERATED_CODE = /^S(\d+)$/;
+
+/** A unique violation on `subjects.code`. Narrow on purpose: a clash on an alias
+ *  the create seeds is a different problem and must not be retried away. */
+function isCodeConflict(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2002' &&
+    String((error.meta as { target?: unknown } | undefined)?.target).includes(
+      'code',
+    )
+  );
+}
 
 export interface LevelView {
   id: number;
@@ -122,24 +141,66 @@ export class CatalogueService {
     return buildPage(rows.map(toSubject), total, query);
   }
 
+  /**
+   * The next free `S###`. Subjects number in the dozens, so reading their codes
+   * and taking the highest is cheaper than a raw-SQL max over a regex, and it
+   * ignores hand-written codes rather than trying to parse them.
+   *
+   * ponytail: read-then-write, so two simultaneous creates could pick the same
+   * code — `createSubject` retries on the unique violation, which is the whole
+   * mitigation. Move to a DB sequence if subjects are ever created in bulk.
+   */
+  private async nextSubjectCode(): Promise<string> {
+    const rows = await this.prisma.subjects.findMany({
+      where: { code: { startsWith: 'S' } },
+      select: { code: true },
+    });
+    const highest = rows.reduce((top, row) => {
+      const digits = GENERATED_CODE.exec(row.code)?.[1];
+      return digits === undefined ? top : Math.max(top, Number(digits));
+    }, 0);
+    return `S${String(highest + 1).padStart(3, '0')}`;
+  }
+
+  /**
+   * Inserts the subject, generating its code when the caller did not supply one.
+   *
+   * A generated code is picked by reading the existing ones, so two creates at
+   * the same moment can choose the same `S###`. That collision is exactly what
+   * the unique index catches, and the only correct response is to pick again —
+   * a caller who supplied their own code gets the conflict raised instead,
+   * because re-picking would silently ignore what they asked for.
+   */
+  private async insertSubject(dto: CreateSubjectDto) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.prisma.subjects.create({
+          data: {
+            code: dto.code ?? (await this.nextSubjectCode()),
+            name_ar: dto.nameAr,
+            short_name_ar: dto.shortNameAr,
+            name_en: dto.nameEn,
+            // Seed the alias table with what the subject is actually called on
+            // the sheets, so the import resolves it without anyone remembering.
+            subject_aliases: {
+              create: aliasRowsFor([dto.nameAr, dto.shortNameAr]),
+            },
+          },
+          include: { subject_aliases: true },
+        });
+      } catch (cause) {
+        const retriable =
+          dto.code === undefined && isCodeConflict(cause) && attempt < 2;
+        if (!retriable) throw cause;
+      }
+    }
+  }
+
   async createSubject(
     dto: CreateSubjectDto,
     actor: Actor,
   ): Promise<SubjectView> {
-    const created = await this.prisma.subjects.create({
-      data: {
-        code: dto.code,
-        name_ar: dto.nameAr,
-        short_name_ar: dto.shortNameAr,
-        name_en: dto.nameEn,
-        // Seed the alias table with what the subject is actually called on the
-        // sheets, so the import resolves it without anyone remembering to.
-        subject_aliases: {
-          create: aliasRowsFor([dto.nameAr, dto.shortNameAr]),
-        },
-      },
-      include: { subject_aliases: true },
-    });
+    const created = await this.insertSubject(dto);
     await this.audit.record(actor, {
       action: 'subject.create',
       entityType: 'subject',
@@ -201,6 +262,48 @@ export class CatalogueService {
     return toAlias(created);
   }
 
+  /**
+   * Deletes a subject that nothing uses.
+   *
+   * The point is the mistyped or duplicated subject that was never taught —
+   * deactivating one of those leaves it in the registry for good, where it keeps
+   * turning up in pickers. A subject that *has* been used is a different thing:
+   * `curriculum`, `sessions`, `carried_subjects` and `timetable_slots` all point
+   * here with ON DELETE RESTRICT, so the database would refuse anyway. This
+   * counts first so the refusal says which of them is holding it, and points at
+   * deactivation instead of leaving a raw constraint error.
+   *
+   * Aliases are not counted: `subject_aliases` cascades, because a spelling of a
+   * subject has no meaning once the subject is gone.
+   */
+  async removeSubject(id: number, actor: Actor): Promise<void> {
+    const before = await this.prisma.subjects.findUniqueOrThrow({
+      where: { id },
+      include: { subject_aliases: true },
+    });
+
+    const [curriculum, sessions, carried, slots] = await this.prisma.$transaction([
+      this.prisma.curriculum.count({ where: { subject_id: id } }),
+      this.prisma.sessions.count({ where: { subject_id: id } }),
+      this.prisma.carried_subjects.count({ where: { subject_id: id } }),
+      this.prisma.timetable_slots.count({ where: { subject_id: id } }),
+    ]);
+    const inUse = curriculum + sessions + carried + slots;
+    if (inUse > 0) {
+      throw new ConflictException(
+        `This subject is in use (${curriculum} curriculum rows, ${sessions} sessions, ${carried} carried subjects, ${slots} timetable slots) and cannot be deleted; deactivate it instead`,
+      );
+    }
+
+    await this.prisma.subjects.delete({ where: { id } });
+    await this.audit.record(actor, {
+      action: 'subject.delete',
+      entityType: 'subject',
+      entityId: String(id),
+      before: toSubject(before),
+    });
+  }
+
   async removeAlias(aliasId: number, actor: Actor): Promise<void> {
     const before = await this.prisma.subject_aliases.findUniqueOrThrow({
       where: { id: aliasId },
@@ -214,13 +317,25 @@ export class CatalogueService {
     });
   }
 
-  async listBooks(query: PageQuery): Promise<Page<BookView>> {
+  async listBooks(query: ListBooksQueryDto): Promise<Page<BookView>> {
+    const where = {
+      ...(query.includeInactive ? {} : { is_active: true }),
+      ...(query.search
+        ? {
+            OR: [
+              { title_ar: { contains: query.search } },
+              { author_ar: { contains: query.search } },
+            ],
+          }
+        : {}),
+    };
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.books.findMany({
+        where,
         orderBy: { title_ar: 'asc' },
         ...toPrismaPage(query),
       }),
-      this.prisma.books.count(),
+      this.prisma.books.count({ where }),
     ]);
     return buildPage(rows.map(toBook), total, query);
   }

@@ -742,7 +742,6 @@ model sessions {
 
 model students {
   id                                                  String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  student_code                                        String                  @unique
   full_name                                           String
   gender                                              gender_t
   branch_id                                           Int?                    @db.SmallInt

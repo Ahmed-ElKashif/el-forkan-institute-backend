@@ -170,11 +170,14 @@ async function main() {
     const enrollments: Array<{ id: string }> = [];
     const demoStudents: Array<{ id: string }> = [];
     for (let i = 0; i < DEMO.students.length; i++) {
-      const code = `DEMO-${String(i + 1).padStart(4, '0')}`;
-      let student = await prisma.students.findFirst({ where: { student_code: code } });
+      // Matched by name, now that a student carries no code. The demo roster is
+      // a fixed list of names, so it is the natural key and a re-run still finds
+      // its own rows rather than creating a second set.
+      let student = await prisma.students.findFirst({
+        where: { full_name: DEMO.students[i], gender: 'male' },
+      });
       student ??= await prisma.students.create({
         data: {
-          student_code: code,
           full_name: DEMO.students[i],
           gender: 'male',
           branch_id: branch.id,
@@ -218,7 +221,7 @@ async function main() {
     // --- supporting data so every screen has something to show --------------
     const geo = await seedGeography(prisma);
     await prisma.students.updateMany({
-      where: { student_code: { startsWith: 'DEMO-' } },
+      where: { id: { in: demoStudents.map((s) => s.id) } },
       data: { governorate_id: geo.governorateId, markaz_id: geo.markazId },
     });
     const girls = await seedGirlsCohort(prisma, branch.id, year.id, level.id, actorId);
@@ -436,11 +439,11 @@ async function seedGirlsCohort(
   });
 
   for (let i = 0; i < names.length; i++) {
-    const code = `DEMO-F${String(i + 1).padStart(3, '0')}`;
-    let student = await prisma.students.findFirst({ where: { student_code: code } });
+    let student = await prisma.students.findFirst({
+      where: { full_name: names[i], gender: 'female' },
+    });
     student ??= await prisma.students.create({
       data: {
-        student_code: code,
         full_name: names[i],
         gender: 'female',
         branch_id: branchId,
@@ -470,10 +473,9 @@ async function seedUnenrolledStudents(
 ): Promise<number> {
   const names = ['طالب بلا سنة (تجريبي أ)', 'طالب بلا سنة (تجريبي ب)'];
   for (let i = 0; i < names.length; i++) {
-    const code = `DEMO-U${String(i + 1).padStart(3, '0')}`;
-    if (!(await prisma.students.findFirst({ where: { student_code: code } }))) {
+    if (!(await prisma.students.findFirst({ where: { full_name: names[i] } }))) {
       await prisma.students.create({
-        data: { student_code: code, full_name: names[i], gender: 'male', branch_id: branchId, created_by: actorId },
+        data: { full_name: names[i], gender: 'male', branch_id: branchId, created_by: actorId },
       });
     }
   }

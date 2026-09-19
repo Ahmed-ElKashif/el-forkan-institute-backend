@@ -26,12 +26,12 @@ import {
   CreateAliasDto,
   CreateBookDto,
   CreateSubjectDto,
+  ListBooksQueryDto,
   ListSubjectsQueryDto,
   UpdateBookDto,
   UpdateLevelDto,
   UpdateSubjectDto,
 } from './dto/catalogue.schema';
-import { PageQueryDto } from './dto/geography.schema';
 
 @Controller()
 export class CatalogueController {
@@ -88,6 +88,19 @@ export class CatalogueController {
     return this.catalogue.addAlias(id, dto, actor);
   }
 
+  /* Only a subject nothing has used yet — the service refuses the rest and says
+     what is holding it. Deactivation (`PATCH`) stays the answer for a subject
+     that has been taught. */
+  @Delete('subjects/:id')
+  @Roles('head_teacher')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeSubject(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentActor() actor: Actor,
+  ): Promise<void> {
+    return this.catalogue.removeSubject(id, actor);
+  }
+
   @Delete('subject-aliases/:id')
   @Roles('head_teacher')
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -99,7 +112,7 @@ export class CatalogueController {
   }
 
   @Get('books')
-  listBooks(@Query() query: PageQueryDto): Promise<Page<BookView>> {
+  listBooks(@Query() query: ListBooksQueryDto): Promise<Page<BookView>> {
     return this.catalogue.listBooks(query);
   }
 
