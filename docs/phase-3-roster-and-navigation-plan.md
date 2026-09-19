@@ -1,7 +1,13 @@
 # Phase 3 — De-bounce attendance/scores navigation + fold student management into the level roster
 
-> Status: planned (not yet implemented). Scope: `frontend/` routing + student
-> management; backend already supports every write this plan needs.
+> Status: **implemented** (frontend only; no backend change was needed). Scope:
+> `frontend/` routing + student management.
+>
+> **Deviation worth noting:** with `/students` folded away, teachers still need to
+> reach a roster, which lives in the level hub. So the **Levels** nav entry became
+> open to both roles (moved to the *teaching* group); its head-teacher-only tabs
+> (catalogue, class days, teachers) stay gated inside the hub, as before. `/students`
+> now redirects to `/levels`; `/students/:id` (the profile) stays.
 
 ## Context
 

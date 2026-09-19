@@ -81,7 +81,6 @@ export interface EnrollmentView {
   id: string;
   studentId: string;
   studentName: string;
-  studentCode: string;
   sectionId: string;
   academicYearId: number;
   branchId: number;
@@ -91,6 +90,10 @@ export interface EnrollmentView {
   defaultAttendanceMode: string;
   finalDecision: string | null;
   isHistorical: boolean;
+  /** Subjects this enrolment still owes from an earlier level (R13/R14), still
+   *  pending. Lets the roster flag "carries a subject from a previous level"
+   *  without a per-row query; the detail lives on the student profile. */
+  pendingCarryCount: number;
 }
 
 export interface PhoneCoverage {
@@ -104,7 +107,12 @@ const SECTION_SHAPE = {
     section_teachers: {
       include: { user: { select: { full_name: true } } },
     },
-    _count: { select: { enrollments: true } },
+    /* Active enrolments only. A `completed` one was promoted out of this class
+       and a `withdrawn` one has left, so counting every row ever created told
+       the roster it held students it does not list — the roster reads active
+       members, and a class that graduated its intake reported a full register
+       over an empty table. */
+    _count: { select: { enrollments: { where: { status: 'active' } } } },
   },
 } satisfies Prisma.sectionsDefaultArgs;
 
@@ -112,7 +120,7 @@ type SectionRecord = Prisma.sectionsGetPayload<typeof SECTION_SHAPE>;
 
 const ENROLLMENT_SHAPE = {
   include: {
-    student: { select: { full_name: true, student_code: true } },
+    student: { select: { full_name: true } },
   },
 } satisfies Prisma.enrollmentsDefaultArgs;
 
@@ -409,7 +417,24 @@ export class SectionsService {
       }),
       this.prisma.enrollments.count({ where }),
     ]);
-    return buildPage(rows.map(toEnrollment), total, query);
+
+    // One grouped read for the page's pending carries, rather than a per-row
+    // query: the carry's `enrollment_id` is the enrolment that inherited the
+    // debt, so this counts exactly "subjects owed from an earlier level".
+    const carryCounts = await this.prisma.carried_subjects.groupBy({
+      by: ['enrollment_id'],
+      where: { status: 'pending', enrollment_id: { in: rows.map((row) => row.id) } },
+      _count: { _all: true },
+    });
+    const pendingByEnrollment = new Map(
+      carryCounts.map((row) => [row.enrollment_id, row._count._all]),
+    );
+
+    return buildPage(
+      rows.map((row) => toEnrollment(row, pendingByEnrollment.get(row.id) ?? 0)),
+      total,
+      query,
+    );
   }
 
   /**
@@ -599,12 +624,14 @@ function toSection(row: SectionRecord): SectionView {
   };
 }
 
-function toEnrollment(row: EnrollmentRecord): EnrollmentView {
+/** `pendingCarryCount` is supplied by the roster read (it groups carries for the
+ *  whole page at once); the single-row write paths have no carries to show and
+ *  pass the default. */
+function toEnrollment(row: EnrollmentRecord, pendingCarryCount = 0): EnrollmentView {
   return {
     id: row.id,
     studentId: row.student_id,
     studentName: row.student.full_name,
-    studentCode: row.student.student_code,
     sectionId: row.section_id,
     academicYearId: row.academic_year_id,
     branchId: row.branch_id,
@@ -614,5 +641,6 @@ function toEnrollment(row: EnrollmentRecord): EnrollmentView {
     defaultAttendanceMode: row.default_attendance_mode,
     finalDecision: row.final_decision,
     isHistorical: row.is_historical,
+    pendingCarryCount,
   };
 }

@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, students as StudentRecord } from '@prisma/client';
 import type { Actor } from '../common/actor.decorator';
 import { AuditService } from '../common/audit.service';
@@ -22,7 +18,6 @@ import type {
 
 export interface StudentView {
   id: string;
-  studentCode: string;
   fullName: string;
   gender: string;
   branchId: number | null;
@@ -220,7 +215,6 @@ export class StudentsService {
 
     const created = await this.prisma.students.create({
       data: {
-        student_code: dto.studentCode ?? (await this.nextStudentCode()),
         full_name: dto.fullName,
         gender: dto.gender,
         branch_id: branchId,
@@ -264,7 +258,6 @@ export class StudentsService {
       // branches. For a branch-bound viewer this is `undefined`, so the column
       // is left untouched and the student cannot be moved out of reach.
       branch_id: viewer.branchId === null ? dto.branchId : undefined,
-      student_code: dto.studentCode,
       phone: dto.phone,
       whatsapp_phone: dto.whatsappPhone,
       governorate_id: dto.governorateId,
@@ -422,30 +415,6 @@ export class StudentsService {
     }
     return student;
   }
-
-  /**
-   * §10 item 3 leaves the format open, so this generates a stable, sortable
-   * one: the Gregorian year plus a zero-padded sequence within it. Supplying
-   * `studentCode` explicitly overrides it, which is what the institute's own
-   * convention will use once it is decided.
-   */
-  private async nextStudentCode(): Promise<string> {
-    const yearPrefix = String(new Date().getUTCFullYear());
-    const latest = await this.prisma.students.findFirst({
-      where: { student_code: { startsWith: `${yearPrefix}-` } },
-      orderBy: { student_code: 'desc' },
-      select: { student_code: true },
-    });
-    const lastSequence = latest
-      ? Number.parseInt(latest.student_code.split('-')[1] ?? '0', 10)
-      : 0;
-    if (Number.isNaN(lastSequence)) {
-      throw new BadRequestException(
-        'Existing student codes do not match the generated format; supply studentCode explicitly',
-      );
-    }
-    return `${yearPrefix}-${String(lastSequence + 1).padStart(4, '0')}`;
-  }
 }
 
 /** The student's current-year level, when the row was loaded with the join. */
@@ -534,7 +503,6 @@ function toStudent(
 ): StudentView {
   return {
     id: row.id,
-    studentCode: row.student_code,
     fullName: row.full_name,
     gender: row.gender,
     branchId: row.branch_id,

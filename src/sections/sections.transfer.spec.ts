@@ -18,7 +18,7 @@ const ENROLLMENT = {
   default_attendance_mode: 'onsite',
   final_decision: null,
   is_historical: false,
-  student: { full_name: 'أحمد سالم', student_code: '2026-0001' },
+  student: { full_name: 'أحمد سالم' },
 };
 
 const SECTIONS: Record<string, unknown> = {

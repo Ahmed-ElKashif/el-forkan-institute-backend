@@ -40,6 +40,28 @@ const LEVELS = [
   { code: 'COMP', nameAr: 'المستوى الختامي', sortOrder: 6, isTerminal: true, grantsCertificate: true },
 ] as const;
 
+// The student address lookup: a governorate and its مراكز. Nothing else ever
+// loaded these — the only inserts in the tree were one governorate and one markaz
+// in the demo seed — so the المركز field on the student form had a single option
+// and read as broken.
+//
+// Aswan's مراكز, the administrative list the institute's own paperwork uses. The
+// import also resolves the «المركز» column against these names (§6.2), so a
+// spelling here is what a roster file has to match.
+const GOVERNORATE_AR = 'أسوان';
+const MARKAZES_AR = [
+  'أسوان',
+  'دراو',
+  'كوم أمبو',
+  'نصر النوبة',
+  'إدفو',
+  'الرديسية',
+  'البصيلية',
+  'السباعية',
+  'أبو سمبل',
+  'كلابشة',
+] as const;
+
 // إخوة / أخوات — the wording the institute's own roster sheets use, and the
 // sheet names the Excel import and export read and write (R3). One vocabulary
 // everywhere beats three that mean the same thing.
@@ -97,6 +119,22 @@ async function main() {
       }
     }
 
+    // Idempotent on the natural keys the schema already declares:
+    // `governorates.name_ar` is unique, and a markaz is unique within its
+    // governorate — so a re-run adds only what is missing and never duplicates.
+    const governorate = await prisma.governorates.upsert({
+      where: { name_ar: GOVERNORATE_AR },
+      update: {},
+      create: { name_ar: GOVERNORATE_AR },
+    });
+    for (const nameAr of MARKAZES_AR) {
+      await prisma.markazes.upsert({
+        where: { governorate_id_name_ar: { governorate_id: governorate.id, name_ar: nameAr } },
+        update: {},
+        create: { governorate_id: governorate.id, name_ar: nameAr },
+      });
+    }
+
     let sectionsCreated = 0;
     for (const l of LEVELS) {
       const level = await prisma.levels.upsert({
@@ -107,8 +145,13 @@ async function main() {
 
       for (const g of GENDERS) {
         const name = `${l.nameAr} — ${g.suffix}`;
+        /* Matched on the unique key the database actually enforces — branch,
+           year, level, gender — and deliberately NOT on `name`. A class renamed
+           since it was seeded is still that class; including the name here found
+           nothing and the create then failed on the constraint, which is what
+           broke a second run of this "idempotent" seed. */
         const exists = await prisma.sections.findFirst({
-          where: { branch_id: branch.id, academic_year_id: year.id, level_id: level.id, gender: g.gender, name },
+          where: { branch_id: branch.id, academic_year_id: year.id, level_id: level.id, gender: g.gender },
         });
         if (!exists) {
           await prisma.sections.create({
@@ -122,6 +165,7 @@ async function main() {
     console.log('Institute bootstrap complete:');
     console.log('  branch:          ', branch.name_ar);
     console.log('  academic year:   ', year.hijri_year, 'هـ');
+    console.log('  governorate:     ', governorate.name_ar, `(${MARKAZES_AR.length} مركز)`);
     console.log('  levels:          ', LEVELS.length);
     console.log('  sections created:', sectionsCreated, `(of ${LEVELS.length * GENDERS.length})`);
     await prisma.$disconnect();

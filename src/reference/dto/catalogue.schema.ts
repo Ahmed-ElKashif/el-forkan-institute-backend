@@ -21,6 +21,11 @@ export const UpdateLevelSchema = z
 
 export const CreateSubjectSchema = z
   .object({
+    /* Optional: nothing in the system reads a subject's code — the Excel import
+       resolves subjects through `subject_aliases.normalized`, never this — so
+       asking the head teacher to invent one was ceremony. Omit it and the
+       service generates the next `S###`. Still unique and immutable once set,
+       and a caller that wants a meaningful code may still supply one. */
     code: z
       .string()
       .trim()
@@ -29,16 +34,22 @@ export const CreateSubjectSchema = z
       .regex(
         /^[A-Z][A-Z0-9_]*$/,
         'Use upper-case letters, digits and underscore',
-      ),
+      )
+      .optional(),
     nameAr: ArabicName,
     shortNameAr: ArabicName.optional(),
     nameEn: z.string().trim().min(2).max(120).optional(),
   })
   .strict();
 
-// `code` is referenced by seeds and imports; renaming it silently would break
-// alias resolution. Deactivation replaces deletion — curriculum rows point
-// here with ON DELETE RESTRICT.
+// `code` is immutable once set — it is only ever generated, and nothing reads
+// it (the import resolves subjects through `subject_aliases`), so there is
+// nothing to gain by rewriting one.
+//
+// Deactivation is how a subject that has been *taught* leaves circulation:
+// curriculum rows, sessions, carried subjects and timetable slots all point here
+// with ON DELETE RESTRICT. A subject nothing has used can be deleted outright
+// (`DELETE /subjects/:id`), which is the mistyped-entry case.
 export const UpdateSubjectSchema = CreateSubjectSchema.omit({ code: true })
   .extend({ isActive: z.boolean() })
   .partial();
@@ -63,6 +74,14 @@ export const ListSubjectsQuerySchema = PageQuerySchema.extend({
   includeInactive: z.stringbool().default(false),
 }).strict();
 
+// The same two filters subjects have. Without them a book could only be reached
+// by paging to it, and the unit picker had to hide inactive books client-side
+// after the API had already sent them.
+export const ListBooksQuerySchema = PageQuerySchema.extend({
+  search: z.string().trim().min(1).max(160).optional(),
+  includeInactive: z.stringbool().default(false),
+}).strict();
+
 export class UpdateLevelDto extends createZodDto(UpdateLevelSchema) {}
 export class CreateSubjectDto extends createZodDto(CreateSubjectSchema) {}
 export class UpdateSubjectDto extends createZodDto(UpdateSubjectSchema) {}
@@ -72,3 +91,4 @@ export class UpdateBookDto extends createZodDto(UpdateBookSchema) {}
 export class ListSubjectsQueryDto extends createZodDto(
   ListSubjectsQuerySchema,
 ) {}
+export class ListBooksQueryDto extends createZodDto(ListBooksQuerySchema) {}

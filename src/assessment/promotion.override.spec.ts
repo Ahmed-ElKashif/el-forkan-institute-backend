@@ -28,13 +28,17 @@ const BRANCH_HEAD: AuthenticatedUser = {
 const TEACHER: AuthenticatedUser = { id: 't1', role: 'teacher', branchId: 1 };
 const ACTOR: Actor = { userId: 'h1' };
 
-/** One clean enrolment: nothing failed, so the engine says `promote`. */
+/** One clean enrolment: nothing failed, so the engine says `promote`. Shaped to
+ *  match the `preview` include — the pending-carry relation and the decision
+ *  columns are always present on a real read. */
 function enrollment(overrides: unknown[] = []) {
   return {
     id: 'enr1',
     student_id: 'stu1',
     student: { full_name: 'أحمد سالم' },
     is_historical: false,
+    final_decision: null,
+    decided_at: null,
     section: {
       levels: {
         id: 2,
@@ -45,6 +49,7 @@ function enrollment(overrides: unknown[] = []) {
     },
     exam_results: [],
     promotion_overrides: overrides,
+    carried_subjects_carried_subjects_enrollment_idToenrollments: [],
   };
 }
 
@@ -116,6 +121,30 @@ describe('PromotionService.preview — overrides', () => {
 
     expect(row.decision).toBe('promote');
     expect(row.override).toBeNull();
+  });
+
+  it('surfaces subjects still owed from an earlier level, and a prior verdict', async () => {
+    const { service, prisma } = buildService();
+    prisma.enrollments.findMany.mockResolvedValue([
+      {
+        ...enrollment(),
+        // A verdict a prior confirm already applied (run-progress signal).
+        final_decision: 'promote',
+        decided_at: new Date('2026-06-10T00:00:00Z'),
+        // A level-1 subject carried onto this level-2 enrolment, still pending.
+        carried_subjects_carried_subjects_enrollment_idToenrollments: [
+          { subject_id: 7, subjects: { name_ar: 'النحو' }, levels: { code: 'L1' } },
+        ],
+      },
+    ]);
+
+    const [row] = await service.preview(run(), HEAD);
+
+    expect(row.pendingCarries).toEqual([
+      { subjectId: 7, nameAr: 'النحو', originLevelCode: 'L1' },
+    ]);
+    expect(row.finalDecision).toBe('promote');
+    expect(row.decidedAt).toBe('2026-06-10T00:00:00.000Z');
   });
 
   it('reads only the round being run, so a pre-makeup override cannot decide the makeup', async () => {

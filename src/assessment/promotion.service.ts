@@ -58,6 +58,20 @@ export interface PromotionPreviewRow {
   /** Set when the row cannot be decided — a missing progression rule, or a
    * historical enrolment. Rows with a blocker are never written. */
   blocker: string | null;
+  /** The verdict already applied to this enrolment by a prior confirm (and when),
+   *  so the screen can show run progress and mark a re-run's rows as already
+   *  done rather than a fresh slate. Null until the first confirm. */
+  finalDecision: string | null;
+  decidedAt: string | null;
+  /** Subjects this student still owes from an EARLIER level (R13/R14), pending.
+   *  Informational: shown beside this year's failures so the head teacher sees
+   *  the full debt. The engine does not read it — carries gate COMP entry, not
+   *  level-to-level promotion. */
+  pendingCarries: Array<{
+    subjectId: number;
+    nameAr: string;
+    originLevelCode: string;
+  }>;
 }
 
 export interface CertificateView {
@@ -88,7 +102,6 @@ export interface CertificatePrintPayload {
   certificateId: string;
   serialNo: string | null;
   studentName: string;
-  studentCode: string;
   levelCode: string;
   levelNameAr: string;
   instituteNameAr: string;
@@ -156,6 +169,16 @@ export class PromotionService {
         // head teacher's verdict travels with the engine's rather than needing a
         // second query per student.
         promotion_overrides: { where: { after_makeup: dto.afterMakeup } },
+        // Subjects owed from an earlier level, still pending — shown beside this
+        // year's failures. The carrying enrolment IS this row, so no join back
+        // through the student is needed here.
+        carried_subjects_carried_subjects_enrollment_idToenrollments: {
+          where: { status: 'pending' },
+          include: {
+            subjects: { select: { name_ar: true } },
+            levels: { select: { code: true } },
+          },
+        },
         exam_results: {
           include: {
             exams: {
@@ -183,6 +206,16 @@ export class PromotionService {
         studentName: enrollment.student.full_name,
         levelId: level.id,
         levelCode: level.code,
+        finalDecision: enrollment.final_decision,
+        decidedAt: enrollment.decided_at?.toISOString() ?? null,
+        pendingCarries:
+          enrollment.carried_subjects_carried_subjects_enrollment_idToenrollments.map(
+            (carry) => ({
+              subjectId: carry.subject_id,
+              nameAr: carry.subjects.name_ar,
+              originLevelCode: carry.levels.code,
+            }),
+          ),
       };
 
       // §4.3: "never re-run the promotion engine over historical rows." The
@@ -431,6 +464,7 @@ export class PromotionService {
     enrollmentsCreated: number;
     carriesWritten: number;
     notMovedForward: number;
+    graduated: number;
   }> {
     /* Replays the scoped preview, so an enrolment the viewer may not reach is
        never in `previewed` — and the length check below then refuses the whole
@@ -459,7 +493,11 @@ export class PromotionService {
     let enrollmentsCreated = 0;
     let carriesWritten = 0;
     let notMovedForward = 0;
+    let graduated = 0;
 
+    // A level's run can decide dozens of enrolments, each 2–6 serial writes to
+    // remote Postgres; the default 5s interactive-transaction budget (P2028) is
+    // too tight for a whole level, so give the batch room.
     await this.prisma.$transaction(async (tx) => {
       for (const row of selected) {
         await tx.enrollments.update({
@@ -473,9 +511,20 @@ export class PromotionService {
           },
         });
 
-        // A makeup is still this year's business, and a graduate has no next
-        // level to go to.
-        if (row.decision === 'makeup_required' || row.decision === 'graduate') {
+        // A graduate has finished the institute (a clean terminal level, L4 or
+        // COMP): mark the student, so they leave the active rosters and land in
+        // the graduates registry. Idempotent — re-running a confirmed run just
+        // re-sets the same status.
+        if (row.decision === 'graduate') {
+          await tx.students.update({
+            where: { id: row.studentId },
+            data: { status: 'graduated' },
+          });
+          graduated += 1;
+          continue;
+        }
+        // A makeup is still this year's business — no next level to go to yet.
+        if (row.decision === 'makeup_required') {
           continue;
         }
 
@@ -533,7 +582,7 @@ export class PromotionService {
           }
         }
       }
-    });
+    }, { maxWait: 10_000, timeout: 60_000 });
 
     await this.audit.record(actor, {
       action: 'promotion.confirm',
@@ -544,6 +593,7 @@ export class PromotionService {
         enrollmentsCreated,
         carriesWritten,
         notMovedForward,
+        graduated,
         afterMakeup: dto.afterMakeup,
         decisions: selected.map((row) => ({
           enrollmentId: row.enrollmentId,
@@ -556,6 +606,7 @@ export class PromotionService {
       enrollmentsCreated,
       carriesWritten,
       notMovedForward,
+      graduated,
     };
   }
 
@@ -848,7 +899,7 @@ export class PromotionService {
     const certificate = await this.prisma.certificates.findUniqueOrThrow({
       where: { id: certificateId },
       include: {
-        students: { select: { full_name: true, student_code: true } },
+        students: { select: { full_name: true } },
         levels: { select: { code: true, name_ar: true } },
         academic_years: { select: { hijri_year: true } },
         branches: { select: { name_ar: true } },
@@ -892,7 +943,6 @@ export class PromotionService {
       certificateId: certificate.id,
       serialNo: certificate.serial_no,
       studentName: certificate.students.full_name,
-      studentCode: certificate.students.student_code,
       levelCode: certificate.levels.code,
       levelNameAr: certificate.levels.name_ar,
       instituteNameAr: settings.name_ar,

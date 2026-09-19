@@ -185,13 +185,12 @@ try {
       const enrollments = [];
       for (const fullName of names) {
         studentSeq += 1;
-        const code = `1447-${String(studentSeq).padStart(4, '0')}`;
         const student = await one(
-          `INSERT INTO students (student_code, full_name, gender, branch_id, phone, whatsapp_phone,
+          `INSERT INTO students (full_name, gender, branch_id, phone, whatsapp_phone,
                                  governorate_id, markaz_id, address, birth_date, status, whatsapp_opt_in)
-           VALUES ($1,$2,$3,$4,$5,$5,$6,$7,'أسوان — إدفو', DATE '2008-05-01','active',true)
+           VALUES ($1,$2,$3,$4,$4,$5,$6,'أسوان — إدفو', DATE '2008-05-01','active',true)
            RETURNING id`,
-          [code, fullName, gender, branchId, `+2011${String(2000000 + studentSeq).slice(-7)}`, govId, markazId],
+          [fullName, gender, branchId, `+2011${String(2000000 + studentSeq).slice(-7)}`, govId, markazId],
         );
         const enrollment = await one(
           `INSERT INTO enrollments (student_id, section_id, academic_year_id, branch_id, gender, entry_type, status)

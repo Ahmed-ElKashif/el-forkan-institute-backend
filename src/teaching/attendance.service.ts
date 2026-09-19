@@ -35,7 +35,6 @@ export interface AttendanceCell {
 export interface AttendanceGridRow {
   enrollmentId: string;
   studentName: string;
-  studentCode: string;
   defaultAttendanceMode: string;
   cells: AttendanceCell[];
   absenceCount: number;
@@ -105,7 +104,7 @@ export class AttendanceService {
       this.prisma.enrollments.findMany({
         where: { section_id: sectionId, status: 'active' },
         include: {
-          student: { select: { full_name: true, student_code: true } },
+          student: { select: { full_name: true } },
           attendance: {
             where: {
               sessions: {
@@ -137,7 +136,6 @@ export class AttendanceService {
         return {
           enrollmentId: enrollment.id,
           studentName: enrollment.student.full_name,
-          studentCode: enrollment.student.student_code,
           defaultAttendanceMode: enrollment.default_attendance_mode,
           absenceCount: enrollment.attendance.filter(
             (record) => record.status === 'absent',
