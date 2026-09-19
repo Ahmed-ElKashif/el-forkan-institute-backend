@@ -20,7 +20,27 @@ const HEAD: AuthenticatedUser = {
 const TEACHER: AuthenticatedUser = { id: 't1', role: 'teacher', branchId: 1 };
 const ACTOR: Actor = { userId: 'h1' };
 
-function enrollment(name: string, carries: string[] = []) {
+/** Levels a carry can originate from, as `loadScope` now includes them — the
+ *  origin level is what names the column the carry is printed in. */
+const LEVELS: Record<
+  number,
+  { id: number; name_ar: string; sort_order: number }
+> = {
+  1: { id: 1, name_ar: 'المستوى الأول', sort_order: 1 },
+  2: { id: 2, name_ar: 'المستوى الثاني', sort_order: 2 },
+};
+
+/** A pending carry: the subject owed and the level it was failed at. */
+function carry(nameAr: string, originLevelId: number) {
+  return {
+    status: 'pending',
+    origin_level_id: originLevelId,
+    subjects: { name_ar: nameAr },
+    levels: LEVELS[originLevelId],
+  };
+}
+
+function enrollment(name: string, carries: ReturnType<typeof carry>[] = []) {
   return {
     final_decision: 'promote',
     student: {
@@ -29,14 +49,15 @@ function enrollment(name: string, carries: string[] = []) {
       whatsapp_phone: null,
       markazes: { name_ar: 'مركز أسوان' },
     },
-    carried_subjects_carried_subjects_enrollment_idToenrollments: carries.map(
-      (name_ar) => ({ status: 'pending', subjects: { name_ar } }),
-    ),
+    carried_subjects_carried_subjects_enrollment_idToenrollments: carries,
   };
 }
 
 const SECTIONS = [
-  { gender: 'male', enrollments: [enrollment('أحمد سالم', ['النحو'])] },
+  {
+    gender: 'male',
+    enrollments: [enrollment('أحمد سالم', [carry('النحو', 1)])],
+  },
   { gender: 'female', enrollments: [enrollment('فاطمة علي')] },
 ];
 
@@ -102,13 +123,89 @@ describe('ExportService — preview', () => {
       'م',
       'الأسم',
       'النتيجة',
-      'المواد المتبقية',
+      'مواد من المستوى الأول',
     ]);
     expect(preview.sheets[0].rows[0]).toEqual([
       '1',
       'أحمد سالم',
       'إجتاز المستوى',
       'النحو',
+    ]);
+  });
+
+  /* §6.1: the institute's sheets give each origin level its own column. A
+     student owing subjects to two levels must not have them merged into one
+     cell — the head teacher needs to see which level each debt belongs to, and
+     the importer reads them back per column. */
+  it('gives every origin level its own column, oldest first', async () => {
+    const { service, prisma } = buildService();
+    prisma.sections.findMany.mockResolvedValue([
+      {
+        gender: 'male',
+        enrollments: [
+          enrollment('أحمد سالم', [carry('النحو', 2), carry('الفقه', 1)]),
+        ],
+      },
+      { gender: 'female', enrollments: [] },
+    ]);
+
+    const preview = await service.previewRoster(1, undefined, HEAD);
+
+    expect(preview.sheets[0].headers).toEqual([
+      'م',
+      'الأسم',
+      'المركز',
+      'رقم الهاتف',
+      'مواد من المستوى الأول',
+      'مواد من المستوى الثاني',
+    ]);
+    expect(preview.sheets[0].rows[0].slice(4)).toEqual(['الفقه', 'النحو']);
+  });
+
+  /* An empty cell reads as a column somebody forgot to fill in; a placeholder
+     reads as "owes nothing here", which is the fact. */
+  it('prints a placeholder where a student owes that level nothing', async () => {
+    const { service, prisma } = buildService();
+    prisma.sections.findMany.mockResolvedValue([
+      {
+        gender: 'male',
+        enrollments: [
+          enrollment('أحمد سالم', [carry('الفقه', 1)]),
+          enrollment('محمود زكريا', [carry('النحو', 2)]),
+        ],
+      },
+      { gender: 'female', enrollments: [] },
+    ]);
+
+    const preview = await service.previewRoster(1, undefined, HEAD);
+
+    expect(preview.sheets[0].rows[0].slice(4)).toEqual(['الفقه', '—']);
+    expect(preview.sheets[0].rows[1].slice(4)).toEqual(['—', 'النحو']);
+  });
+
+  /* A cleared carry is settled debt. It must not create a column of its own,
+     nor appear in one. */
+  it('ignores cleared carries entirely', async () => {
+    const { service, prisma } = buildService();
+    prisma.sections.findMany.mockResolvedValue([
+      {
+        gender: 'male',
+        enrollments: [
+          enrollment('أحمد سالم', [
+            { ...carry('الفقه', 1), status: 'cleared' },
+          ]),
+        ],
+      },
+      { gender: 'female', enrollments: [] },
+    ]);
+
+    const preview = await service.previewRoster(1, undefined, HEAD);
+
+    expect(preview.sheets[0].headers).toEqual([
+      'م',
+      'الأسم',
+      'المركز',
+      'رقم الهاتف',
     ]);
   });
 

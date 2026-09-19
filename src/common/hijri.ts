@@ -1,13 +1,18 @@
-import umalqura from '@umalqura/core';
+import { gregorianToHijri, hijriToGregorian } from '@tabby_ai/hijri-converter';
 
 /**
  * Hijri ↔ Gregorian conversion for *suggesting* calendar dates.
  *
- * Spec §7.5: `@umalqura/core` implements the **Saudi** Umm al-Qura calendar.
- * Egyptian institutions often follow the Survey Authority's calculation or
- * local sighting, which differ by a day often enough to matter. Gregorian is
- * stored truth; every date produced here is a default the head teacher can
- * overwrite, never a value the system schedules against on its own.
+ * Spec §7.5: the Umm al-Qura calendar is the **Saudi** reckoning. Egyptian
+ * institutions often follow the Survey Authority's calculation or local
+ * sighting, which differ by a day often enough to matter. Gregorian is stored
+ * truth; every date produced here is a default the head teacher can overwrite,
+ * never a value the system schedules against on its own.
+ *
+ * `@tabby_ai/hijri-converter` converts between plain `{year, month, day}`
+ * records and never constructs a `Date`, so there is no local-vs-UTC midnight
+ * to defend against: this module is the only place a `Date` is built, and it
+ * builds it directly in UTC.
  */
 
 export interface HijriDate {
@@ -17,32 +22,40 @@ export interface HijriDate {
 }
 
 /**
- * Returns a UTC-midnight Date, which is what a Postgres `DATE` column needs.
+ * Every Hijri month has 29 days; only some have a 30th.
  *
- * `@umalqura/core` builds its `.date` at *local* midnight, so in any timezone
- * east of UTC that instant is the previous calendar day in UTC — handing it
- * straight to Prisma stores the date one day early. Verified locally: in
- * UTC+3, `umalqura(1447, 10, 15).date` is `2026-04-02T22:00:00Z`, which a
- * `DATE` column truncates to 2026-04-02 rather than the intended 2026-04-03.
+ * `institute_settings.year_start/end_hijri_day` accepts 1-30, so a head
+ * teacher can legitimately anchor the year to "the 30th" of a month that has
+ * 29 days in a given year. That has to mean the end of the month, not an
+ * error: the boundary is a recurring rule applied to many years, and refusing
+ * it would make planning fail in some years and succeed in others.
  */
+const SHORTEST_HIJRI_MONTH = 29;
+
+function clampToMonthEnd(hijri: HijriDate): HijriDate {
+  if (hijri.day <= SHORTEST_HIJRI_MONTH) {
+    return hijri;
+  }
+  try {
+    hijriToGregorian(hijri);
+    return hijri;
+  } catch {
+    return { ...hijri, day: SHORTEST_HIJRI_MONTH };
+  }
+}
+
+/** Returns a UTC-midnight Date, which is what a Postgres `DATE` column needs. */
 export function hijriToUtcDate(hijri: HijriDate): Date {
-  const local = umalqura(hijri.year, hijri.month, hijri.day).date;
-  return new Date(
-    Date.UTC(local.getFullYear(), local.getMonth(), local.getDate()),
-  );
+  const gregorian = hijriToGregorian(clampToMonthEnd(hijri));
+  return new Date(Date.UTC(gregorian.year, gregorian.month - 1, gregorian.day));
 }
 
 export function toHijri(date: Date): HijriDate {
-  // Read the UTC calendar day back at local noon so the library's own
-  // local-midnight convention cannot round it to the neighbouring day.
-  const local = new Date(
-    date.getUTCFullYear(),
-    date.getUTCMonth(),
-    date.getUTCDate(),
-    12,
-  );
-  const converted = umalqura(local);
-  return { year: converted.hy, month: converted.hm, day: converted.hd };
+  return gregorianToHijri({
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  });
 }
 
 export function addDaysUtc(date: Date, days: number): Date {

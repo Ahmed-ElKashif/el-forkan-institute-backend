@@ -1,0 +1,16 @@
+{
+  // Dev scripts only — `npm run import:check`. They are excluded from
+  // tsconfig.build.json because they live outside rootDir and are not part of
+  // the running app, so they need a config of their own to be runnable.
+  //
+  // The root config is `nodenext`, which makes ts-node treat these as ESM and
+  // refuse the relative imports below. CommonJS is what ts-node runs happily
+  // under this package.json (which has no "type": "module").
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "noEmit": true
+  },
+  "include": ["scripts/**/*.ts"]
+}

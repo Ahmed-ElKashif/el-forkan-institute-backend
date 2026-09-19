@@ -25,6 +25,11 @@
     // hardcoded default password into the bundle), prisma.config.ts is CLI-only
     // configuration, and the prisma/tools helpers are plain .mjs dev scripts.
     "prisma",
-    "prisma.config.ts"
+    "prisma.config.ts",
+    // Same category: `npm run import:check` is a dev tool that reads the real
+    // workbooks through the real parser. It imports from prisma/ as well as
+    // src/, so including it would drag rootDir back up to the project root —
+    // the very thing the rootDir pin above exists to prevent.
+    "scripts"
   ]
 }

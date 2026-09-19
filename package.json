@@ -21,7 +21,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "import:check": "ts-node -P tsconfig.scripts.json scripts/check-sample-imports.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -32,7 +33,7 @@
     "@nestjs/throttler": "^6.5.0",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.10.0",
-    "@umalqura/core": "^0.0.7",
+    "@tabby_ai/hijri-converter": "^1.0.5",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
